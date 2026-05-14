@@ -1,0 +1,714 @@
+from __future__ import annotations
+
+import time
+from collections import deque
+from pathlib import Path
+
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QFont, QTextCursor
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QFileDialog,
+    QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QSpinBox,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
+
+# src/modpack_translator/gui/ → 上 4 層到專案根目錄
+_PROJECT_ROOT = Path(__file__).parents[3]
+
+from modpack_translator.config import load_config
+from modpack_translator.gui.worker import ScanWorker, TranslateWorker
+
+
+def _make_help_label(tooltip_text: str) -> QPushButton:
+    btn = QPushButton("?")
+    btn.setFixedSize(22, 22)
+    btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    btn.setCursor(Qt.CursorShape.WhatsThisCursor)
+    btn.setToolTip(tooltip_text)
+    btn.setStyleSheet("""
+        QPushButton {
+            color: #2980b9;
+            font-weight: bold;
+            border: 1.5px solid #2980b9;
+            border-radius: 11px;
+            background: transparent;
+            font-size: 12px;
+        }
+        QPushButton:hover {
+            background: #d6eaf8;
+            color: #1a5276;
+            border-color: #1a5276;
+        }
+    """)
+    return btn
+
+
+_PROGRESS_STYLE_BLUE = """
+    QProgressBar {
+        border: 1px solid #bbb;
+        border-radius: 4px;
+        text-align: center;
+        font-size: 13px;
+        font-weight: bold;
+    }
+    QProgressBar::chunk {
+        background-color: #2980b9;
+        border-radius: 3px;
+    }
+"""
+
+_PROGRESS_STYLE_GREEN = """
+    QProgressBar {
+        border: 1px solid #bbb;
+        border-radius: 4px;
+        text-align: center;
+        font-size: 13px;
+        font-weight: bold;
+    }
+    QProgressBar::chunk {
+        background-color: #27ae60;
+        border-radius: 3px;
+    }
+"""
+
+_PROGRESS_STYLE_ORANGE = """
+    QProgressBar {
+        border: 1px solid #bbb;
+        border-radius: 4px;
+        text-align: center;
+        font-size: 13px;
+        font-weight: bold;
+    }
+    QProgressBar::chunk {
+        background-color: #e67e22;
+        border-radius: 3px;
+    }
+"""
+
+_FMT_NAME_MAP: dict[str, str] = {
+    "json_lang":            "JSON 語言檔",
+    "legacy_lang":          "舊式 .lang 檔",
+    "patchouli_json":       "Patchouli 書頁",
+    "ftbq_snbt":            "FTB 任務 SNBT",
+    "ftbq_inline_snbt":     "FTB 任務 inline SNBT",
+    "heracles_snbt":        "Heracles 任務 SNBT",
+    "heracles_inline_snbt": "Heracles inline SNBT",
+    "bq_lang":              "Better Questing lang",
+    "kubejs_json":          "KubeJS JSON",
+}
+
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Minecraft模組包翻譯器v1.0.0")
+        self.setMinimumWidth(760)
+        self.setMinimumHeight(660)
+
+        self._scan_targets: list = []
+        self._scan_fmt_counts: dict = {}
+        self._scan_total_pairs: int = 0
+        self._translate_worker: TranslateWorker | None = None
+        self._scan_worker: ScanWorker | None = None
+
+        self._translated_modpack_path: str = ""
+        self._translation_start_time: float = 0.0
+        self._translation_total: int = 0
+        self._current_progress: int = 0
+        self._pairs_done: int = 0
+        self._translation_cancelled: bool = False
+        # 滑動視窗速度計算：(timestamp, cumulative_pairs) 最近 500 筆
+        self._speed_samples: deque = deque(maxlen=500)
+        self._last_pair_time: float = 0.0
+
+        self._stats_timer = QTimer(self)
+        self._stats_timer.setInterval(1000)
+        self._stats_timer.timeout.connect(self._update_stats_label)
+
+        # 60 秒逾時強制停止（safety net）
+        self._force_stop_timer = QTimer(self)
+        self._force_stop_timer.setSingleShot(True)
+        self._force_stop_timer.setInterval(60_000)
+        self._force_stop_timer.timeout.connect(self._force_stop_worker)
+
+        self._cfg = None
+        try:
+            self._cfg = load_config(
+                _PROJECT_ROOT / "configs" / "model.yaml",
+                _PROJECT_ROOT / "configs" / "paths.yaml",
+                _PROJECT_ROOT / "configs" / "languages" / "zh_tw.yaml",
+            )
+        except Exception:
+            pass
+
+        self._build_ui()
+
+    # ------------------------------------------------------------------ UI
+
+    def _build_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        root_layout = QVBoxLayout(central)
+        root_layout.setSpacing(8)
+        root_layout.setContentsMargins(12, 12, 12, 12)
+
+        # ── 模組包群組 ────────────────────────────────────────────────────
+        modpack_group = QGroupBox("模組包")
+        mf = QFormLayout(modpack_group)
+        mf.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+
+        modpack_row = QHBoxLayout()
+        self.modpack_edit = QLineEdit()
+        self.modpack_edit.setPlaceholderText("模組包實例資料夾路徑…")
+        self.modpack_edit.textChanged.connect(self._on_modpack_path_changed)
+        _browse_modpack_btn = QPushButton("瀏覽…")
+        _browse_modpack_btn.setFixedWidth(80)
+        _browse_modpack_btn.clicked.connect(self._browse_modpack)
+        modpack_row.addWidget(self.modpack_edit)
+        modpack_row.addWidget(_browse_modpack_btn)
+        mf.addRow("模組包資料夾：", modpack_row)
+
+        root_layout.addWidget(modpack_group)
+
+        # ── 模型設定群組 ──────────────────────────────────────────────────
+        model_group = QGroupBox("模型設定")
+        mgf = QFormLayout(model_group)
+        mgf.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+
+        # LoRA 適配器路徑
+        lora_row = QHBoxLayout()
+        self.lora_edit = QLineEdit()
+        self.lora_edit.setText(
+            self._cfg.model.lora_gguf_path if self._cfg else "adapter/minecraft_translator_gemma4_e4b_lora.gguf"
+        )
+        _browse_lora_btn = QPushButton("瀏覽…")
+        _browse_lora_btn.setFixedWidth(80)
+        _browse_lora_btn.clicked.connect(self._browse_gguf)
+        lora_help = _make_help_label(
+            "LoRA 適配器為微調後的模型差異檔（.gguf），提供 Minecraft 翻譯專用能力。\n"
+            "必須與基礎模型搭配使用。"
+        )
+        lora_row.addWidget(self.lora_edit)
+        lora_row.addWidget(_browse_lora_btn)
+        lora_row.addWidget(lora_help)
+        mgf.addRow("LoRA 適配器：", lora_row)
+
+        # 基礎模型路徑（可選）
+        base_row = QHBoxLayout()
+        self.base_gguf_edit = QLineEdit()
+        self.base_gguf_edit.setPlaceholderText("留空自動下載（約 5 GB，僅首次）")
+        self.base_gguf_edit.setText(self._cfg.model.base_gguf_path if self._cfg else "")
+        _browse_base_btn = QPushButton("瀏覽…")
+        _browse_base_btn.setFixedWidth(80)
+        _browse_base_btn.clicked.connect(self._browse_base_gguf)
+        base_help = _make_help_label(
+            "基礎模型 GGUF 檔（約 5 GB）。\n"
+            "留空時程式自動從 HuggingFace 下載並快取，僅首次需要網路連線。"
+        )
+        base_row.addWidget(self.base_gguf_edit)
+        base_row.addWidget(_browse_base_btn)
+        base_row.addWidget(base_help)
+        mgf.addRow("基礎模型：", base_row)
+
+        # GPU 層數
+        gpu_row = QHBoxLayout()
+        self.gpu_layers_spin = QSpinBox()
+        self.gpu_layers_spin.setRange(-1, 200)
+        self.gpu_layers_spin.setValue(self._cfg.model.n_gpu_layers if self._cfg else -1)
+        self.gpu_layers_spin.setFixedWidth(70)
+        gpu_help = _make_help_label(
+            "指定卸載至 GPU 的模型層數。\n"
+            "-1 = 全部卸載至 GPU（最快）\n"
+            " 0 = 僅使用 CPU（最慢但相容性最高）\n"
+            "需要 CUDA 版 llama-cpp-python。"
+        )
+        gpu_row.addWidget(self.gpu_layers_spin)
+        gpu_row.addWidget(QLabel("  （−1 = 全 GPU，0 = 僅 CPU）"))
+        gpu_row.addWidget(gpu_help)
+        gpu_row.addStretch()
+        mgf.addRow("GPU 層數：", gpu_row)
+
+        root_layout.addWidget(model_group)
+
+        # ── 選項群組 ──────────────────────────────────────────────────────
+        options_group = QGroupBox("選項")
+        opt_vbox = QVBoxLayout(options_group)
+
+        checkbox_row = QHBoxLayout()
+        self.chk_mods = QCheckBox("翻譯模組 (.jar)")
+        self.chk_mods.setChecked(True)
+        chk_mods_help = _make_help_label(
+            "掃描並翻譯模組 .jar 中的 en_us 語言檔。\n"
+            "翻譯結果直接注入回 jar（原始 jar 備份至 mods_bak/）。"
+        )
+        self.chk_quests = QCheckBox("翻譯任務書")
+        self.chk_quests.setChecked(True)
+        chk_quests_help = _make_help_label(
+            "翻譯 FTB Quests、Heracles、Better Questing 及 KubeJS 的語言字串。\n"
+            "原始配置備份至 quests_bak/。"
+        )
+        checkbox_row.addWidget(self.chk_mods)
+        checkbox_row.addWidget(chk_mods_help)
+        checkbox_row.addSpacing(16)
+        checkbox_row.addWidget(self.chk_quests)
+        checkbox_row.addWidget(chk_quests_help)
+        checkbox_row.addStretch()
+
+        retry_row = QHBoxLayout()
+        self.retry_spin = QSpinBox()
+        self.retry_spin.setRange(0, 10)
+        self.retry_spin.setValue(3)
+        self.retry_spin.setFixedWidth(90)
+        retry_help = _make_help_label(
+            "當後處理器偵測到佔位符遺失時，自動重試翻譯的次數。\n"
+            "適用於含有 {0}、%1$s 等格式代碼的字串。\n"
+            "0 = 不重試，直接以原文回退並記錄至 Failed Items/。"
+        )
+        retry_row.addWidget(QLabel("重試次數："))
+        retry_row.addWidget(self.retry_spin)
+        retry_row.addWidget(retry_help)
+        retry_row.addStretch()
+
+        opt_vbox.addLayout(checkbox_row)
+        opt_vbox.addLayout(retry_row)
+
+        root_layout.addWidget(options_group)
+
+        # ── 操作按鈕 ──────────────────────────────────────────────────────
+        btn_row = QHBoxLayout()
+        self.scan_btn = QPushButton("🔍  掃描模組包")
+        self.scan_btn.setFixedHeight(36)
+        self.scan_btn.clicked.connect(self._on_scan)
+
+        self.translate_btn = QPushButton("▶  開始翻譯")
+        self.translate_btn.setFixedHeight(36)
+        self.translate_btn.setEnabled(False)
+        self.translate_btn.clicked.connect(self._on_translate_toggle)
+
+        btn_row.addWidget(self.scan_btn)
+        btn_row.addWidget(self.translate_btn)
+        root_layout.addLayout(btn_row)
+
+        # ── 進度條（加厚） ────────────────────────────────────────────────
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFixedHeight(28)
+        self.progress_bar.setStyleSheet(_PROGRESS_STYLE_BLUE)
+        root_layout.addWidget(self.progress_bar)
+
+        # 速度/時間統計標籤
+        self.stats_label = QLabel("")
+        self.stats_label.setVisible(False)
+        self.stats_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.stats_label.setStyleSheet("color: #5dade2;")
+        root_layout.addWidget(self.stats_label)
+
+        # ── 掃描結果面板 ──────────────────────────────────────────────────
+        result_header = QHBoxLayout()
+        result_lbl = QLabel("掃描結果：")
+        bold = QFont()
+        bold.setBold(True)
+        result_lbl.setFont(bold)
+        copy_btn = QPushButton("複製")
+        copy_btn.setFixedWidth(60)
+        copy_btn.clicked.connect(self._copy_log)
+        result_header.addWidget(result_lbl)
+        result_header.addStretch()
+        result_header.addWidget(copy_btn)
+        root_layout.addLayout(result_header)
+
+        self.log_edit = QTextEdit()
+        self.log_edit.setReadOnly(True)
+        mono = QFont("Consolas", 9)
+        mono.setStyleHint(QFont.StyleHint.Monospace)
+        self.log_edit.setFont(mono)
+        self.log_edit.setMinimumHeight(220)
+        root_layout.addWidget(self.log_edit, stretch=1)
+
+    # ------------------------------------------------------------------ 瀏覽
+
+    def _browse_modpack(self):
+        path = QFileDialog.getExistingDirectory(self, "選擇模組包實例資料夾")
+        if path:
+            self.modpack_edit.setText(path)
+
+    def _browse_gguf(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "選擇 LoRA 適配器 GGUF",
+            str(_PROJECT_ROOT / "adapter"),
+            "GGUF Files (*.gguf);;All Files (*)",
+        )
+        if path:
+            self.lora_edit.setText(path)
+
+    def _browse_base_gguf(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "選擇基礎模型 GGUF",
+            str(_PROJECT_ROOT),
+            "GGUF Files (*.gguf);;All Files (*)",
+        )
+        if path:
+            self.base_gguf_edit.setText(path)
+
+    # ------------------------------------------------------------------ 複製
+
+    def _copy_log(self):
+        QApplication.clipboard().setText(self.log_edit.toPlainText())
+
+    # ------------------------------------------------------------------ 輔助
+
+    def _validate_inputs(self) -> bool:
+        modpack = self.modpack_edit.text().strip()
+        if not modpack:
+            QMessageBox.warning(self, "缺少輸入", "請選擇模組包資料夾。")
+            return False
+        if not Path(modpack).exists():
+            QMessageBox.warning(self, "路徑無效", f"找不到模組包資料夾：\n{modpack}")
+            return False
+        if not self.chk_mods.isChecked() and not self.chk_quests.isChecked():
+            QMessageBox.warning(self, "選項無效", "請至少勾選「翻譯模組」或「翻譯任務書」其中一項。")
+            return False
+        return True
+
+    def _build_cfg(self):
+        try:
+            cfg = load_config(
+                _PROJECT_ROOT / "configs" / "model.yaml",
+                _PROJECT_ROOT / "configs" / "paths.yaml",
+                _PROJECT_ROOT / "configs" / "languages" / "zh_tw.yaml",
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "設定檔錯誤", f"無法載入設定檔：\n{exc}")
+            return None
+
+        cfg.model.lora_gguf_path = self.lora_edit.text().strip() or cfg.model.lora_gguf_path
+        cfg.model.base_gguf_path = self.base_gguf_edit.text().strip()
+        cfg.model.n_gpu_layers   = self.gpu_layers_spin.value()
+        cfg.paths.create_output_dirs()
+        return cfg
+
+    def _set_busy(self, busy: bool):
+        self.scan_btn.setEnabled(not busy)
+        if not busy:
+            self.translate_btn.setEnabled(len(self._scan_targets) > 0)
+
+    _SPEED_WINDOW = 30.0   # 秒，滑動視窗寬度
+    _STALL_SECS   = 8.0    # 超過此秒數無進度 → 顯示「翻譯中…」
+
+    def _update_stats_label(self):
+        now = time.monotonic()
+        elapsed = now - self._translation_start_time
+        pairs_done = self._pairs_done
+
+        # 已用時間（始終精確）
+        elapsed_int = int(elapsed)
+        h, rem = divmod(elapsed_int, 3600)
+        m, s = divmod(rem, 60)
+        elapsed_str = f"{h:02d}:{m:02d}:{s:02d}"
+
+        # 判斷是否正在等待單次長推理
+        stalled = (now - self._last_pair_time) > self._STALL_SECS
+
+        if stalled:
+            # 模型正在推理一條較長的字串
+            speed_str = "翻譯中…"
+            eta_str   = "計算中…"
+        else:
+            # 滑動視窗：取最近 30 秒內的樣本計算速度
+            cutoff = now - self._SPEED_WINDOW
+            window = [(t, p) for t, p in self._speed_samples if t >= cutoff]
+            if len(window) >= 2:
+                dt = window[-1][0] - window[0][0]
+                dp = window[-1][1] - window[0][1]
+                if dt > 0 and dp > 0:
+                    speed = dp / dt
+                    total_pairs = max(self._scan_total_pairs, pairs_done + 1)
+                    remaining  = max(0, total_pairs - pairs_done)
+                    eta_int = int(remaining / speed)
+                    eh, erem = divmod(eta_int, 3600)
+                    em, es = divmod(erem, 60)
+                    speed_str = f"{speed:.1f}"
+                    eta_str   = f"{eh:02d}:{em:02d}:{es:02d}"
+                else:
+                    speed_str = "—"
+                    eta_str   = "—"
+            else:
+                speed_str = "—"
+                eta_str   = "—"
+
+        self.stats_label.setText(
+            f"速度：{speed_str} 句/秒  |  已用時間：{elapsed_str}  |  預計剩餘：{eta_str}"
+        )
+
+    # ------------------------------------------------------------------ 掃描
+
+    def _on_scan(self):
+        if not self._validate_inputs():
+            return
+
+        self._set_busy(True)
+        self.translate_btn.setEnabled(False)
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.setFormat("")
+        self.progress_bar.setStyleSheet(_PROGRESS_STYLE_BLUE)
+        self.progress_bar.setVisible(True)
+        self.stats_label.setVisible(False)
+        self.log_edit.setPlainText("")
+
+        self._scan_worker = ScanWorker(
+            modpack_path=Path(self.modpack_edit.text().strip()),
+            skip_mods=not self.chk_mods.isChecked(),
+            skip_quests=not self.chk_quests.isChecked(),
+            lang_code=(self._cfg.language.code if self._cfg else "zh_tw"),
+        )
+        self._scan_worker.finished.connect(self._on_scan_finished)
+        self._scan_worker.error.connect(self._on_error)
+        self._scan_worker.start()
+
+    def _on_scan_finished(self, targets, fmt_counts, total_pairs, samples):
+        self._scan_targets     = targets
+        self._scan_fmt_counts  = fmt_counts
+        self._scan_total_pairs = total_pairs
+
+        self.progress_bar.setRange(0, 1)
+        self.progress_bar.setValue(1)
+        self.progress_bar.setVisible(False)
+        self._set_busy(False)
+
+        if not targets:
+            QMessageBox.warning(
+                self,
+                "未找到翻譯目標",
+                "掃描完成，但未找到可翻譯的檔案。\n\n"
+                "可能原因：\n"
+                "  • 模組包路徑不正確（應選包含 mods/ 資料夾的目錄）\n"
+                "  • 該模組包已全部翻譯完成\n"
+                "  • 未勾選任何翻譯選項\n"
+                "  • 模組語言檔不含英文（en_us）字串",
+            )
+            self.log_edit.setPlainText("掃描完成 — 未找到可翻譯的檔案。")
+            return
+
+        modpack_path = self.modpack_edit.text().strip()
+        lines = [
+            f"遊戲根目錄：{modpack_path}",
+            "",
+            f"翻譯目標總計：{len(targets)} 個檔案",
+        ]
+        for fmt, count in sorted(fmt_counts.items()):
+            display_fmt = _FMT_NAME_MAP.get(fmt, fmt)
+            lines.append(f"  {display_fmt}：{count} 個")
+
+        lines += [
+            "",
+            f"待翻譯鍵值對總數：{total_pairs:,} 組",
+        ]
+
+        if samples:
+            lines += ["", "樣本字串（每種格式最多 3 條）："]
+            for fmt, fmt_samples in samples.items():
+                display_fmt = _FMT_NAME_MAP.get(fmt, fmt)
+                lines.append(f"  [{display_fmt}]")
+                for mod_id, key, val in fmt_samples:
+                    display = val[:80] + "…" if len(val) > 80 else val
+                    lines.append(f"    ({mod_id})  {key}")
+                    lines.append(f'    → "{display}"')
+
+        self.log_edit.setPlainText("\n".join(lines))
+        self.translate_btn.setEnabled(True)
+
+    # ------------------------------------------------------------------ 翻譯
+
+    def _on_translate_toggle(self):
+        if self._translate_worker and self._translate_worker.isRunning():
+            self._translation_cancelled = True
+            self._translate_worker.cancel()
+            self.translate_btn.setText("停止中…")
+            self.translate_btn.setEnabled(False)
+            self._force_stop_timer.start()   # 60 秒後若未停止則強制中止
+        else:
+            self._start_translation()
+
+    def _start_translation(self):
+        if not self._scan_targets:
+            QMessageBox.information(self, "請先掃描", "請先執行掃描模組包。")
+            return
+
+        cfg = self._build_cfg()
+        if cfg is None:
+            return
+
+        lora_path = Path(cfg.model.lora_gguf_path)
+        if not lora_path.is_absolute():
+            lora_path = _PROJECT_ROOT / lora_path
+        if not lora_path.exists():
+            QMessageBox.warning(self, "找不到 LoRA 適配器",
+                                f"找不到 LoRA 適配器 GGUF：\n{lora_path}")
+            return
+
+        modpack_path = Path(self.modpack_edit.text().strip()).resolve()
+
+        self.translate_btn.setText("⏹  停止")
+        self.translate_btn.setStyleSheet("background-color: #c0392b; color: white;")
+        self.scan_btn.setEnabled(False)
+
+        n_files = len(self._scan_targets)
+        # 用字串對數作為進度條上限，讓進度隨每條字串平滑推進
+        # 若掃描未統計出對數（罕見），退回使用檔案數
+        n_pairs = self._scan_total_pairs if self._scan_total_pairs > 0 else n_files
+        self.progress_bar.setRange(0, n_pairs)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("%p%")
+        self.progress_bar.setStyleSheet(_PROGRESS_STYLE_BLUE)
+        self.progress_bar.setVisible(True)
+
+        self._translation_start_time = time.monotonic()
+        self._translation_total = n_files
+        self._current_progress = 0
+        self._pairs_done = 0
+        self._translation_cancelled = False
+        self._speed_samples.clear()
+        self._last_pair_time = time.monotonic()
+        self.stats_label.setText("速度：— 句/秒  |  已用時間：00:00:00  |  預計剩餘：—")
+        self.stats_label.setVisible(True)
+        self._stats_timer.start()
+
+        self._translate_worker = TranslateWorker(
+            targets=self._scan_targets,
+            cfg=cfg,
+            modpack_path=modpack_path,
+            retry_count=self.retry_spin.value(),
+        )
+        self._translate_worker.progress.connect(self._on_translate_progress)
+        self._translate_worker.pair_progress.connect(self._on_pair_progress)
+        self._translate_worker.finished.connect(self._on_translate_finished)
+        self._translate_worker.error.connect(self._on_error)
+        self._translate_worker.start()
+
+    def _on_translate_progress(self, current: int, total: int, mod_id: str, pairs_done: int):
+        # 只追蹤目前第幾個檔案；進度條改由 _on_pair_progress 逐條更新
+        self._current_progress = current + 1
+
+    def _on_pair_progress(self, pairs_done: int):
+        """每條字串翻譯完成後（節流版）由 worker 呼叫，同步更新進度條與滑動視窗樣本。"""
+        now = time.monotonic()
+        self._pairs_done = pairs_done
+        self._last_pair_time = now
+        self._speed_samples.append((now, pairs_done))
+        # 進度條以字串對數平滑推進；clamp 防止估算差異造成超出 maximum
+        self.progress_bar.setValue(min(pairs_done, self.progress_bar.maximum()))
+
+    def _on_translate_finished(self, translated: int, cached: int, fallback: int, failed_files: int):
+        self._stats_timer.stop()
+        self._force_stop_timer.stop()
+        self._update_stats_label()
+        self._set_busy(False)
+
+        existing = self.log_edit.toPlainText()
+        summary_lines = ["", "─" * 40]
+
+        if self._translation_cancelled:
+            self.progress_bar.setStyleSheet(_PROGRESS_STYLE_ORANGE)
+            self.translate_btn.setText("↩  已停止，繼續？")
+            self.translate_btn.setStyleSheet("background-color: #e67e22; color: white;")
+            summary_lines += [
+                "翻譯已中止",
+                f"  已翻譯：{translated:,} 組",
+                f"  快取命中：{cached:,} 組",
+                f"  回退（使用原文）：{fallback:,} 組",
+            ]
+        else:
+            self.progress_bar.setValue(self.progress_bar.maximum())
+            self.progress_bar.setStyleSheet(_PROGRESS_STYLE_GREEN)
+            self.translate_btn.setText("✓  完成")
+            self.translate_btn.setStyleSheet("background-color: #27ae60; color: white;")
+            self._translated_modpack_path = self.modpack_edit.text().strip()
+            summary_lines += [
+                "翻譯完成",
+                f"  已翻譯：{translated:,} 組",
+                f"  快取命中：{cached:,} 組",
+                f"  回退（使用原文）：{fallback:,} 組",
+            ]
+
+        if failed_files > 0:
+            summary_lines.append(
+                f"  ⚠ {failed_files} 個模組/任務書含失敗項目 → 詳見 Failed Items/ 資料夾"
+            )
+        self.log_edit.setPlainText(existing + "\n" + "\n".join(summary_lines))
+        self.log_edit.moveCursor(QTextCursor.MoveOperation.End)
+
+    # ------------------------------------------------------------------ 錯誤
+
+    def _on_error(self, msg: str):
+        self._stats_timer.stop()
+        self._force_stop_timer.stop()
+        self.translate_btn.setText("▶  開始翻譯")
+        self.translate_btn.setStyleSheet("")
+        self.progress_bar.setVisible(False)
+        self.stats_label.setVisible(False)
+        self._set_busy(False)
+        QMessageBox.critical(self, "錯誤", msg)
+
+    # ------------------------------------------------------------------ 強制停止
+
+    def _force_stop_worker(self):
+        """
+        60 秒逾時安全網：
+        1. 向 Python 執行緒注入 SystemExit（比 terminate() 更安全，不在 C 層截斷）
+        2. 等待 5 秒讓執行緒清理
+        3. 仍未停止才用 QThread.terminate() 作最後手段
+        備份已在翻譯開始前完成，即使強制停止也可從 mods_bak/quests_bak/ 還原。
+        """
+        if not (self._translate_worker and self._translate_worker.isRunning()):
+            return
+
+        import ctypes
+
+        thread_id = getattr(self._translate_worker, "_thread_id", None)
+        if thread_id is not None:
+            ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                ctypes.c_ulong(thread_id),
+                ctypes.py_object(SystemExit),
+            )
+            if self._translate_worker.wait(5000):
+                return   # 注入成功，執行緒已停止
+
+        # 最後手段
+        self._translate_worker.terminate()
+        self._translate_worker.wait(2000)
+
+        QMessageBox.warning(
+            self,
+            "已強制停止",
+            "翻譯執行緒因逾時已強制中止。\n\n"
+            "如有 JAR 檔案損壞，請從 mods_bak/ 還原。\n"
+            "如有任務設定損壞，請從 quests_bak/ 還原。",
+        )
+        self.translate_btn.setText("↩  已停止，繼續？")
+        self.translate_btn.setStyleSheet("background-color: #e67e22; color: white;")
+        self.translate_btn.setEnabled(True)
+        self.scan_btn.setEnabled(True)
+        self.stats_label.setVisible(False)
+
+    # ------------------------------------------------------------------ 路徑變更
+
+    def _on_modpack_path_changed(self, new_path: str):
+        current_text = self.translate_btn.text()
+        if current_text in ("✓  完成", "↩  已停止，繼續？"):
+            self.translate_btn.setText("▶  開始翻譯")
+            self.translate_btn.setStyleSheet("")
+            self.progress_bar.setStyleSheet(_PROGRESS_STYLE_BLUE)

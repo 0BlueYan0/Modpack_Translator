@@ -1,0 +1,29 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info/
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── Runtime outputs (generated at translation time) ───────────────────────────
+outputs/
+Failed Items/
+mods_bak/
+quests_bak/
+data/
+logs/
+
+# ── IDE / editor settings ─────────────────────────────────────────────────────
+.idea/
+.vscode/
+
+# ── Misc ──────────────────────────────────────────────────────────────────────
+*.log
+.env
+.env.*

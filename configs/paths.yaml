@@ -1,0 +1,4 @@
+paths:
+  output_root: "outputs"
+  resource_pack_dir: "outputs/resource_packs"
+  translation_cache: "outputs/translation_cache.json"

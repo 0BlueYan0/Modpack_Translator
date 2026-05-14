@@ -1,0 +1,17 @@
+model:
+  # Base model — auto-downloaded from HuggingFace on first run (~5 GB, one-time)
+  # Set base_gguf_path to a local file path to skip the download.
+  base_gguf_path: ""
+  base_hf_repo: "unsloth/gemma-4-E4B-it-GGUF"
+  base_hf_filename: "gemma-4-E4B-it-Q4_K_M.gguf"
+
+  # LoRA adapter exported from training (the 66 MB file)
+  lora_gguf_path: "adapter/minecraft_translator_gemma4_e4b_lora.gguf"
+  lora_scale: 1.0
+
+  n_gpu_layers: -1        # -1 = all layers on GPU; 0 = CPU only
+  n_ctx: 2048
+  max_tokens: 512
+  temperature: 0.05
+  repeat_penalty: 1.1
+  verbose: false
