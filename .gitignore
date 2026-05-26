@@ -12,6 +12,7 @@ venv/
 env/
 
 # ── Runtime outputs (generated at translation time) ───────────────────────────
+.runtime/
 outputs/
 Failed Items/
 mods_bak/

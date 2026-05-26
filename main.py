@@ -13,7 +13,7 @@ from modpack_translator.gui.main_window import MainWindow
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Minecraft模組包翻譯器")
-    app.setApplicationDisplayName("Minecraft模組包翻譯器v1.0.0")
+    app.setApplicationDisplayName("Minecraft模組包翻譯器v1.1.0")
     win = MainWindow()
     win.show()
     sys.exit(app.exec())

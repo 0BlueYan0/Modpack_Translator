@@ -1,11 +1,103 @@
 from __future__ import annotations
 
+import json
+import os
+import shlex
+import signal
+import subprocess
+import time
 from pathlib import Path
 from typing import Callable
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 from modpack_translator.config import ModelConfig
 
 _PROJECT_ROOT = Path(__file__).parents[3]
+_RUNTIME_BACKEND = _PROJECT_ROOT / ".runtime" / "backend.json"
+_SERVER_LOG = _PROJECT_ROOT / ".runtime" / "llama-server.log"
+
+
+class _WindowsJob:
+    def __init__(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        class IO_COUNTERS(ctypes.Structure):
+            _fields_ = [
+                ("ReadOperationCount", ctypes.c_ulonglong),
+                ("WriteOperationCount", ctypes.c_ulonglong),
+                ("OtherOperationCount", ctypes.c_ulonglong),
+                ("ReadTransferCount", ctypes.c_ulonglong),
+                ("WriteTransferCount", ctypes.c_ulonglong),
+                ("OtherTransferCount", ctypes.c_ulonglong),
+            ]
+
+        class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                ("IoInfo", IO_COUNTERS),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        self._ctypes = ctypes
+        self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        self._kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+        self._kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        self._kernel32.SetInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+        ]
+        self._kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        self._kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        self._kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        self._kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        self._kernel32.CloseHandle.restype = wintypes.BOOL
+
+        self._handle = self._kernel32.CreateJobObjectW(None, None)
+        if not self._handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+
+        info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation.LimitFlags = 0x00002000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        ok = self._kernel32.SetInformationJobObject(
+            self._handle,
+            9,  # JobObjectExtendedLimitInformation
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        )
+        if not ok:
+            self.close()
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    def assign(self, process: subprocess.Popen) -> None:
+        ok = self._kernel32.AssignProcessToJobObject(self._handle, int(process._handle))
+        if not ok:
+            raise self._ctypes.WinError(self._ctypes.get_last_error())
+
+    def close(self) -> None:
+        if self._handle:
+            self._kernel32.CloseHandle(self._handle)
+            self._handle = None
 
 
 def _resolve_local(rel_or_abs: str) -> Path:
@@ -45,23 +137,191 @@ def _resolve_lora_gguf(cfg: ModelConfig) -> Path:
     return p
 
 
+def _load_runtime_backend() -> dict:
+    if not _RUNTIME_BACKEND.exists():
+        return {}
+    try:
+        return json.loads(_RUNTIME_BACKEND.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Invalid backend config: {_RUNTIME_BACKEND}: {exc}") from exc
+
+
+def _normalize_base_url(url: str) -> str:
+    url = url.rstrip("/")
+    return url[:-3] if url.endswith("/v1") else url
+
+
+def _as_command(value: str | list[str] | None) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        command = [str(part) for part in value]
+    else:
+        command = shlex.split(value, posix=os.name != "nt")
+
+    # Older setup output passed --lora_scale to llama_cpp.server. The Python
+    # server does not accept that flag in current releases, so sanitize stale
+    # .runtime/backend.json files instead of making users rerun setup.
+    cleaned: list[str] = []
+    skip_next = False
+    for part in command:
+        if skip_next:
+            skip_next = False
+            continue
+        if part == "--lora_scale":
+            skip_next = True
+            continue
+        cleaned.append(part)
+    return cleaned
+
+
+def _server_ready(base_url: str, timeout: float = 3.0) -> bool:
+    request = Request(f"{base_url}/v1/models")
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            return 200 <= response.status < 500
+    except (OSError, URLError):
+        return False
+
+
+def _server_log_tail(max_chars: int = 4000) -> str:
+    if not _SERVER_LOG.exists():
+        return ""
+    try:
+        return _SERVER_LOG.read_text(encoding="utf-8", errors="replace")[-max_chars:].strip()
+    except OSError:
+        return ""
+
+
 class GGUFTranslator:
     def __init__(self, cfg: ModelConfig, system_prompt: str) -> None:
-        from llama_cpp import Llama
+        from openai import OpenAI
 
-        base_path = _resolve_base_gguf(cfg)
-        lora_path = _resolve_lora_gguf(cfg)
-
-        self._llm = Llama(
-            model_path=str(base_path),
-            lora_path=str(lora_path),
-            lora_scale=cfg.lora_scale,
-            n_gpu_layers=cfg.n_gpu_layers,
-            n_ctx=cfg.n_ctx,
-            verbose=cfg.verbose,
+        runtime = _load_runtime_backend()
+        server_url = (
+            os.getenv("MODPACK_TRANSLATOR_SERVER_URL")
+            or os.getenv("LLAMA_SERVER_URL")
+            or runtime.get("server_url")
+            or cfg.server_url
         )
+        api_key = (
+            os.getenv("MODPACK_TRANSLATOR_SERVER_API_KEY")
+            or os.getenv("LLAMA_SERVER_API_KEY")
+            or runtime.get("server_api_key")
+            or cfg.server_api_key
+        )
+        self._model = (
+            os.getenv("MODPACK_TRANSLATOR_SERVER_MODEL")
+            or os.getenv("LLAMA_SERVER_MODEL")
+            or runtime.get("server_model")
+            or cfg.server_model
+        )
+        self._base_url = _normalize_base_url(server_url)
+        self._server_process: subprocess.Popen | None = None
+        self._server_job: _WindowsJob | None = None
+
+        if not _server_ready(self._base_url) and cfg.auto_start_server:
+            command = _as_command(runtime.get("server_command") or cfg.server_start_command)
+            if command:
+                _SERVER_LOG.parent.mkdir(parents=True, exist_ok=True)
+                log = _SERVER_LOG.open("ab")
+                creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+                self._server_process = subprocess.Popen(
+                    command,
+                    cwd=_PROJECT_ROOT,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    creationflags=creationflags,
+                    start_new_session=(os.name != "nt"),
+                )
+                if os.name == "nt":
+                    try:
+                        self._server_job = _WindowsJob()
+                        self._server_job.assign(self._server_process)
+                    except Exception:
+                        if self._server_job is not None:
+                            self._server_job.close()
+                            self._server_job = None
+
+                deadline = time.monotonic() + cfg.server_ready_timeout
+                while time.monotonic() < deadline:
+                    if _server_ready(self._base_url):
+                        break
+                    if self._server_process.poll() is not None:
+                        break
+                    time.sleep(1)
+
+        if not _server_ready(self._base_url):
+            detail = _server_log_tail()
+            suffix = f"\n\nLast llama-server log:\n{detail}" if detail else ""
+            raise RuntimeError(
+                "Local model server is not reachable. Run setup_windows.bat or "
+                "setup_unix.sh first, or start llama-server manually and set "
+                f"LLAMA_SERVER_URL.{suffix}"
+            )
+
+        self._client = OpenAI(base_url=f"{self._base_url}/v1", api_key=api_key)
         self._system_prompt = system_prompt
         self._cfg = cfg
+
+    def close(self) -> None:
+        if self._server_process is None:
+            if self._server_job is not None:
+                self._server_job.close()
+                self._server_job = None
+            return
+        if self._server_process.poll() is not None:
+            self._server_process = None
+            if self._server_job is not None:
+                self._server_job.close()
+                self._server_job = None
+            return
+
+        if os.name == "nt":
+            if self._server_job is not None:
+                self._server_job.close()
+                self._server_job = None
+            else:
+                subprocess.run(
+                    ["taskkill", "/PID", str(self._server_process.pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+        else:
+            try:
+                os.killpg(self._server_process.pid, signal.SIGTERM)
+            except OSError:
+                self._server_process.send_signal(signal.SIGTERM)
+
+        try:
+            self._server_process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            if os.name == "nt":
+                self._server_process.kill()
+            else:
+                try:
+                    os.killpg(self._server_process.pid, signal.SIGKILL)
+                except OSError:
+                    self._server_process.kill()
+            self._server_process.wait(timeout=5)
+        finally:
+            self._server_process = None
+            if self._server_job is not None:
+                self._server_job.close()
+                self._server_job = None
+
+    def __enter__(self) -> "GGUFTranslator":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def translate(self, text: str, cancel_check: Callable[[], bool] | None = None) -> str:
         """
@@ -69,20 +329,21 @@ class GGUFTranslator:
         cancel_check 若回傳 True，立即中止並回傳空字串（使後處理驗證失敗，安全回退至原文）。
         """
         chunks: list[str] = []
-        stream = self._llm.create_chat_completion(
+        stream = self._client.chat.completions.create(
+            model=self._model,
             messages=[
                 {"role": "system", "content": self._system_prompt},
                 {"role": "user",   "content": text},
             ],
             max_tokens=self._cfg.max_tokens,
             temperature=self._cfg.temperature,
-            repeat_penalty=self._cfg.repeat_penalty,
             stream=True,
+            extra_body={"repeat_penalty": self._cfg.repeat_penalty},
         )
         for chunk in stream:
             if cancel_check is not None and cancel_check():
                 return ""   # 強制後處理失敗 → 安全回退至原文
-            delta = chunk["choices"][0]["delta"]
-            if "content" in delta:
-                chunks.append(delta["content"])
+            delta = chunk.choices[0].delta
+            if delta.content:
+                chunks.append(delta.content)
         return "".join(chunks).strip()

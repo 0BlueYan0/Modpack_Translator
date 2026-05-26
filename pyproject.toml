@@ -1,6 +1,6 @@
 [project]
 name = "modpack-translator"
-version = "1.0.0"
+version = "1.1.0"
 description = "Minecraft modpack translator (en_us → zh_tw) using GGUF model inference"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -8,30 +8,18 @@ dependencies = [
     "pydantic>=2.0",
     "pyyaml>=6.0",
     "tqdm>=4.0",
-    # CPU build by default (works everywhere, no GPU required).
-    # For GPU-accelerated inference use the pre-built CUDA wheel (avoids MSVC/MinGW conflicts):
-    #
-    #   Windows (CUDA 12.4):
-    #     uv pip install "https://github.com/abetlen/llama-cpp-python/releases/download/v0.3.23-cu124/llama_cpp_python-0.3.23-py3-none-win_amd64.whl" --force-reinstall
-    #
-    #   Linux / WSL (CUDA 13.x):
-    #     uv pip install "https://github.com/abetlen/llama-cpp-python/releases/download/v0.3.23-cu125/llama_cpp_python-0.3.23-py3-none-linux_x86_64.whl" --force-reinstall
-    #
-    #   For other CUDA versions, browse: https://github.com/abetlen/llama-cpp-python/releases
-    #   and look for the tag matching your version (v0.3.23-cu<version>).
-    # GPU-accelerated GGUF inference. Requires llama-cpp-python v0.3.23-cu125 or later.
-    # Install with pre-built CUDA wheel (no compilation needed):
-    #
-    #   Windows (CUDA 12.4 / 12.5):
-    #     uv pip install "https://github.com/abetlen/llama-cpp-python/releases/download/v0.3.23-cu125/llama_cpp_python-0.3.23-py3-none-win_amd64.whl" --force-reinstall
-    #
-    #   Linux / WSL (CUDA 13.x):
-    #     uv pip install "https://github.com/abetlen/llama-cpp-python/releases/download/v0.3.23-cu125/llama_cpp_python-0.3.23-py3-none-linux_x86_64.whl" --force-reinstall
-    #
-    #   CPU-only fallback (works everywhere, no GPU required, slower):
-    #     uv pip install llama-cpp-python --no-binary llama-cpp-python --force-reinstall
-    #     Then set n_gpu_layers: 0 in configs/model.yaml
-    "llama-cpp-python>=0.2.0",
+    # Runtime inference goes through an OpenAI-compatible local HTTP server.
+    # Run setup_windows.bat or setup_unix.sh to install the correct CUDA wheel,
+    # AMD llama.cpp binary, or CPU server backend for the current machine.
+    "openai>=1.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.22.0",
+    "pydantic-settings>=2.0.1",
+    "sse-starlette>=1.6.1",
+    "starlette-context>=0.3.6,<0.4",
     "huggingface-hub>=0.23.0",
     "PySide6>=6.6.0",
 ]
+
+[tool.uv]
+python-preference = "only-managed"

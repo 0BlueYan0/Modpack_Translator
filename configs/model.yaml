@@ -15,3 +15,12 @@ model:
   temperature: 0.05
   repeat_penalty: 1.1
   verbose: false
+
+  # Local OpenAI-compatible server backend.
+  # setup_windows.bat / setup_unix.sh writes .runtime/backend.json with the
+  # concrete server command for this machine.
+  server_url: "http://127.0.0.1:8080/v1"
+  server_api_key: "llama.cpp"
+  server_model: "local-model"
+  auto_start_server: true
+  server_ready_timeout: 180

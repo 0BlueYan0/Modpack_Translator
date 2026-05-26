@@ -129,9 +129,12 @@ class TranslateWorker(QThread):
         self._modpack_path = modpack_path
         self._retry_count  = retry_count
         self._cancel       = False
+        self._translator: GGUFTranslator | None = None
 
     def cancel(self):
         self._cancel = True
+        if self._translator is not None:
+            self._translator.close()
 
     def run(self):
         self._thread_id = threading.current_thread().ident
@@ -151,68 +154,74 @@ class TranslateWorker(QThread):
                 backed_up = backup_quest_configs(resolve_game_root(self._modpack_path))
                 self.log.emit(f"已備份 {backed_up} 個任務/設定資料夾至 quests_bak/")
 
-            self.log.emit("正在載入 GGUF 模型，請稍候…")
+            self.log.emit("正在連線或啟動本機模型服務，請稍候…")
+            translator = None
             try:
                 translator = GGUFTranslator(self._cfg.model, self._cfg.language.system_prompt)
+                self._translator = translator
             except Exception as exc:
-                self.error.emit(f"模型載入失敗：{exc}")
+                self.error.emit(f"模型服務啟動失敗：{exc}")
                 return
-            self.log.emit("模型載入完成，開始翻譯…")
+            try:
+                self.log.emit("模型服務已就緒，開始翻譯…")
 
-            # 每條字串完成後觸發：更新累計數並節流發送信號（每 0.5 秒最多 1 次）
-            _last_emit_t = [0.0]
+                # 每條字串完成後觸發：更新累計數並節流發送信號（每 0.5 秒最多 1 次）
+                _last_emit_t = [0.0]
 
-            def _on_pair_done(n: int = 1) -> None:
-                nonlocal total_pairs_done
-                total_pairs_done += n
-                now = time.monotonic()
-                if now - _last_emit_t[0] >= 0.5:
-                    self.pair_progress.emit(total_pairs_done)
-                    _last_emit_t[0] = now
+                def _on_pair_done(n: int = 1) -> None:
+                    nonlocal total_pairs_done
+                    total_pairs_done += n
+                    now = time.monotonic()
+                    if now - _last_emit_t[0] >= 0.5:
+                        self.pair_progress.emit(total_pairs_done)
+                        _last_emit_t[0] = now
 
-            for i, target in enumerate(self._targets):
-                if self._cancel:
-                    self.log.emit("已由使用者取消翻譯。")
-                    break
+                for i, target in enumerate(self._targets):
+                    if self._cancel:
+                        self.log.emit("已由使用者取消翻譯。")
+                        break
 
-                self.progress.emit(i, total, target.mod_id, total_pairs_done)
+                    self.progress.emit(i, total, target.mod_id, total_pairs_done)
 
-                try:
-                    n_t, n_c, n_f, failed = process_target(
-                        target, translator, cache,
-                        self._cfg.language.code,
-                        self._retry_count,
-                        cancel_check=lambda: self._cancel,
-                        on_pair_done=_on_pair_done,
+                    try:
+                        n_t, n_c, n_f, failed = process_target(
+                            target, translator, cache,
+                            self._cfg.language.code,
+                            self._retry_count,
+                            cancel_check=lambda: self._cancel,
+                            on_pair_done=_on_pair_done,
+                        )
+                        total_translated += n_t
+                        total_cached     += n_c
+                        total_fallback   += n_f
+                        # total_pairs_done 已由 _on_pair_done 累加，不再重複計算
+                        if failed:
+                            failed_by_target[f"{target.mod_id}__{target.format}"] = failed
+                    except Exception as exc:
+                        self.log.emit(f"[警告] 略過 {target.mod_id}/{target.format}：{exc}")
+                        continue
+
+                    cache_dirty += 1
+                    if cache_dirty >= 100:
+                        _flush_cache(cache_path, cache)
+                        cache_dirty = 0
+                        self.log.emit(f"進度已儲存（{i + 1}/{total} 個檔案）…")
+
+                _flush_cache(cache_path, cache)
+
+                # 寫出失敗項目
+                failed_dir = _PROJECT_ROOT / "Failed Items"
+                failed_files_written = _write_failed_items(failed_by_target, failed_dir)
+                if failed_files_written > 0:
+                    self.log.emit(
+                        f"⚠ {failed_files_written} 個模組/任務書含翻譯失敗項目，"
+                        f"詳見 Failed Items/ 資料夾。"
                     )
-                    total_translated += n_t
-                    total_cached     += n_c
-                    total_fallback   += n_f
-                    # total_pairs_done 已由 _on_pair_done 累加，不再重複計算
-                    if failed:
-                        failed_by_target[f"{target.mod_id}__{target.format}"] = failed
-                except Exception as exc:
-                    self.log.emit(f"[警告] 略過 {target.mod_id}/{target.format}：{exc}")
-                    continue
 
-                cache_dirty += 1
-                if cache_dirty >= 100:
-                    _flush_cache(cache_path, cache)
-                    cache_dirty = 0
-                    self.log.emit(f"進度已儲存（{i + 1}/{total} 個檔案）…")
-
-            _flush_cache(cache_path, cache)
-
-            # 寫出失敗項目
-            failed_dir = _PROJECT_ROOT / "Failed Items"
-            failed_files_written = _write_failed_items(failed_by_target, failed_dir)
-            if failed_files_written > 0:
-                self.log.emit(
-                    f"⚠ {failed_files_written} 個模組/任務書含翻譯失敗項目，"
-                    f"詳見 Failed Items/ 資料夾。"
-                )
-
-            self.finished.emit(total_translated, total_cached, total_fallback, failed_files_written)
+                self.finished.emit(total_translated, total_cached, total_fallback, failed_files_written)
+            finally:
+                translator.close()
+                self._translator = None
 
         except Exception as exc:
             self.error.emit(str(exc))

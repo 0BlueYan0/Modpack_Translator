@@ -1,4 +1,4 @@
-# Minecraft Modpack Translator v1.0.0
+# Minecraft Modpack Translator v1.1.0
 
 **Language / 語言：** English | [繁體中文](README_zh.md)
 
@@ -16,9 +16,8 @@ A tool that automatically translates Minecraft modpack language files from Engli
 |---|---|---|
 | [Git](https://git-scm.com/downloads) | any | Required to clone the repo |
 | [Git LFS](https://git-lfs.com) | any | **Required** — the LoRA adapter (~66 MB) is stored via LFS |
-| [Python](https://www.python.org/downloads/) | 3.10 or higher | |
-| [uv](https://docs.astral.sh/uv/) | latest | Python package manager used by this project |
-| NVIDIA GPU (optional) | CUDA 12.4+ | Strongly recommended; CPU works but is very slow |
+| [uv](https://docs.astral.sh/uv/) | latest | Installs and manages this project's Python runtime |
+| GPU (optional) | NVIDIA CUDA or supported AMD ROCm | Strongly recommended; CPU works but is very slow |
 | Free disk space | ~6 GB | ~66 MB for adapter (LFS) + ~5 GB for base model (auto-download) |
 
 ---
@@ -81,39 +80,53 @@ dir adapter\minecraft_translator_gemma4_e4b_lora.gguf       # Windows
 git lfs pull
 ```
 
-### Step 4 — Install Python dependencies
+### Step 4 — Run the backend setup
 
-```bash
-uv sync
+The setup script installs uv-managed CPython 3.12, creates `.venv/`, detects your hardware, installs the matching local inference backend, downloads the base model, and writes `.runtime/backend.json`. Users do not need to install Python separately.
+
+**Windows:**
+```bat
+setup_windows.bat
 ```
 
-This creates a `.venv/` folder and installs all required packages. The base model (~5 GB) is **not** downloaded here — it is downloaded automatically on the **first translation run**.
+**macOS / Linux:**
+```bash
+./setup_unix.sh
+```
 
-> **Note:** By default, `uv sync` installs the CPU-only build of `llama-cpp-python`. See [GPU Setup](#gpu-setup-optional-but-recommended) below to enable GPU acceleration.
+Hardware selection is automatic:
+
+| Hardware | Backend |
+|---|---|
+| NVIDIA | CUDA `llama-cpp-python[server]` wheel |
+| AMD Windows/Linux | AMD prebuilt `llama.cpp` / `llama-server` binary |
+| CPU only | CPU `llama-cpp-python[server]` wheel |
+
+Close the app before re-running setup. On Windows, a running local model server can lock `.dll` files and prevent backend replacement.
 
 ---
 
-## GPU Setup (Optional but Recommended)
+## Backend Setup Overrides
 
-By default, the CPU build of `llama-cpp-python` is installed. For GPU-accelerated inference, install a pre-built CUDA wheel:
+Auto-detection should be enough for normal users. To force a backend:
 
-**Windows (CUDA 12.4):**
-```bash
-uv pip install "https://github.com/abetlen/llama-cpp-python/releases/download/v0.3.23-cu124/llama_cpp_python-0.3.23-py3-none-win_amd64.whl" --force-reinstall
+**Windows:**
+```bat
+setup_windows.bat --backend cuda
+setup_windows.bat --backend amd
+setup_windows.bat --backend cpu
 ```
 
-**Linux / WSL (CUDA 12.5):**
+**macOS / Linux:**
 ```bash
-uv pip install "https://github.com/abetlen/llama-cpp-python/releases/download/v0.3.23-cu125/llama_cpp_python-0.3.23-py3-none-linux_x86_64.whl" --force-reinstall
+./setup_unix.sh --backend cuda
+./setup_unix.sh --backend amd
+./setup_unix.sh --backend cpu
 ```
 
-For other CUDA versions, browse the [llama-cpp-python releases](https://github.com/abetlen/llama-cpp-python/releases) page and select the wheel matching your CUDA version (tag format: `v0.3.23-cu<version>`).
+The application talks to the model through an OpenAI-compatible local HTTP API. You can also start your own compatible server and set `LLAMA_SERVER_URL`, for example `http://127.0.0.1:8080/v1`.
 
-**CPU-only fallback (no GPU required, slower):**
-```bash
-uv pip install llama-cpp-python --no-binary llama-cpp-python --force-reinstall
-```
-Then set `n_gpu_layers: 0` in `configs/model.yaml`.
+If you change the base model, LoRA adapter, context size, GPU layer count, or backend type in `configs/model.yaml`, run the setup script again so `.runtime/backend.json` is regenerated.
 
 ---
 
@@ -134,6 +147,11 @@ model:
   temperature: 0.05
   repeat_penalty: 1.1
   verbose: false
+  server_url: "http://127.0.0.1:8080/v1"
+  server_api_key: "llama.cpp"
+  server_model: "local-model"
+  auto_start_server: true
+  server_ready_timeout: 180
 ```
 
 ### `configs/paths.yaml`
@@ -156,13 +174,13 @@ Contains the language code, display name, and system prompt for the translation 
 Launch the graphical interface:
 
 ```bash
-uv run main.py
+uv run python main.py
 ```
 
 **Step-by-step workflow:**
 
 1. **Modpack Folder** — Click "瀏覽…" to select your modpack instance directory (the folder containing `mods/`, `config/`, etc.).
-2. **Model Settings** — Leave "Base Model" blank for auto-download. The LoRA adapter path is pre-filled.
+2. **Model Settings** — The normal setup flow already configured the local model server. Only change these fields if you also regenerate the backend setup.
 3. **Options** — Check "翻譯模組 (.jar)" and/or "翻譯任務書". Set retry count (default: 3).
 4. **Scan** — Click "🔍 掃描模組包". The result panel shows the number of targets and sample strings.
 5. **Translate** — Click "▶ 開始翻譯". The progress bar shows percentage, speed, elapsed time, and ETA.
@@ -179,7 +197,7 @@ uv run main.py
 ## CLI Usage
 
 ```bash
-uv run scripts/translate_modpack.py --modpack <path> [options]
+uv run python scripts/translate_modpack.py --modpack <path> [options]
 ```
 
 ### Options
@@ -200,13 +218,13 @@ uv run scripts/translate_modpack.py --modpack <path> [options]
 
 ```bash
 # Dry run to preview what will be translated
-uv run scripts/translate_modpack.py --modpack "C:/CurseForge/Instances/ATM10" --dry-run
+uv run python scripts/translate_modpack.py --modpack "C:/CurseForge/Instances/ATM10" --dry-run
 
 # Full translation with 3 retries per failed string
-uv run scripts/translate_modpack.py --modpack "C:/CurseForge/Instances/ATM10" --retry 3
+uv run python scripts/translate_modpack.py --modpack "C:/CurseForge/Instances/ATM10" --retry 3
 
 # Translate quest files only
-uv run scripts/translate_modpack.py --modpack "C:/CurseForge/Instances/ATM10" --skip-mods --retry 2
+uv run python scripts/translate_modpack.py --modpack "C:/CurseForge/Instances/ATM10" --skip-mods --retry 2
 ```
 
 ---
@@ -259,13 +277,19 @@ uv run scripts/translate_modpack.py --modpack "C:/CurseForge/Instances/ATM10" --
 - If the modpack was already translated, all strings will be skipped.
 - Check that at least one translation option is checked.
 
-**Q: Model fails to load.**
+**Q: Local model server fails to start.**
+- Re-run `setup_windows.bat` or `./setup_unix.sh`.
+- Close the app before re-running setup. A running server can lock backend files on Windows.
+- Check `.runtime/llama-server.log` for the real server error.
+
+**Q: Model files are missing.**
 - Verify the LoRA adapter path in the GUI or `configs/model.yaml`.
-- If the base model download fails, download it manually from HuggingFace and set `base_gguf_path` in the config.
+- If the base model download fails, download it manually from HuggingFace, set `base_gguf_path` in `configs/model.yaml`, then run setup again.
 
 **Q: GPU is not being used / translation is slow.**
-- Install the CUDA wheel for your GPU (see GPU Setup above).
-- Make sure `n_gpu_layers` is set to `-1` (all layers on GPU).
+- Run setup again and check the selected backend in `.runtime/backend.json`.
+- Make sure `n_gpu_layers` is set to `-1` in `configs/model.yaml` before running setup.
+- AMD acceleration uses AMD's prebuilt `llama.cpp` binaries on supported Windows/Linux systems.
 
 **Q: Some strings fall back to English.**
 - This happens when the model output fails the placeholder validation (e.g., a `{0}` format code is missing from the translation).

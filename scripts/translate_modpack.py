@@ -155,42 +155,45 @@ def main():
         backed_up = backup_quest_configs(resolve_game_root(modpack_path))
         print(f"已備份 {backed_up} 個任務/設定資料夾至 quests_bak/")
 
-    print("\n正在載入 GGUF 模型…")
+    print("\n正在連線或啟動本機模型服務…")
     translator = GGUFTranslator(cfg.model, cfg.language.system_prompt)
 
-    cache = _load_cache(cache_path)
-    total_translated = total_cached = total_fallback = 0
-    cache_dirty = 0
-    failed_by_target: dict[str, dict[str, str]] = {}
+    try:
+        cache = _load_cache(cache_path)
+        total_translated = total_cached = total_fallback = 0
+        cache_dirty = 0
+        failed_by_target: dict[str, dict[str, str]] = {}
 
-    for target in tqdm(all_targets, desc="翻譯中", unit="file"):
-        try:
-            n_t, n_c, n_f, failed = process_target(
-                target, translator, cache, cfg.language.code, args.retry,
-            )
-            total_translated += n_t
-            total_cached += n_c
-            total_fallback += n_f
-            if failed:
-                failed_by_target[f"{target.mod_id}__{target.format}"] = failed
-        except Exception as exc:
-            tqdm.write(f"[警告] 略過 {target.mod_id}/{target.format}：{exc}")
-            continue
+        for target in tqdm(all_targets, desc="翻譯中", unit="file"):
+            try:
+                n_t, n_c, n_f, failed = process_target(
+                    target, translator, cache, cfg.language.code, args.retry,
+                )
+                total_translated += n_t
+                total_cached += n_c
+                total_fallback += n_f
+                if failed:
+                    failed_by_target[f"{target.mod_id}__{target.format}"] = failed
+            except Exception as exc:
+                tqdm.write(f"[警告] 略過 {target.mod_id}/{target.format}：{exc}")
+                continue
 
-        cache_dirty += 1
-        if cache_dirty >= 100:
-            _flush_cache(cache_path, cache)
-            cache_dirty = 0
+            cache_dirty += 1
+            if cache_dirty >= 100:
+                _flush_cache(cache_path, cache)
+                cache_dirty = 0
 
-    _flush_cache(cache_path, cache)
+        _flush_cache(cache_path, cache)
 
-    # 寫出失敗項目
-    failed_dir = _PROJECT_ROOT / "Failed Items"
-    failed_files = _write_failed_items(failed_by_target, failed_dir)
-    if failed_files > 0:
-        print(f"⚠ {failed_files} 個模組/任務書含翻譯失敗項目，詳見 Failed Items/ 資料夾。")
+        # 寫出失敗項目
+        failed_dir = _PROJECT_ROOT / "Failed Items"
+        failed_files = _write_failed_items(failed_by_target, failed_dir)
+        if failed_files > 0:
+            print(f"⚠ {failed_files} 個模組/任務書含翻譯失敗項目，詳見 Failed Items/ 資料夾。")
 
-    print(f"\n完成 — 已翻譯={total_translated:,}  快取={total_cached:,}  回退={total_fallback:,}")
+        print(f"\n完成 — 已翻譯={total_translated:,}  快取={total_cached:,}  回退={total_fallback:,}")
+    finally:
+        translator.close()
 
 
 if __name__ == "__main__":

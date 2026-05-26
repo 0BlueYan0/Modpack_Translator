@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 import yaml
 from pydantic import BaseModel, field_validator
@@ -41,6 +40,12 @@ class ModelConfig(BaseModel):
     temperature: float = 0.05
     repeat_penalty: float = 1.1
     verbose: bool = False
+    server_url: str = "http://127.0.0.1:8080/v1"
+    server_api_key: str = "llama.cpp"
+    server_model: str = "local-model"
+    auto_start_server: bool = True
+    server_ready_timeout: int = 180
+    server_start_command: str | list[str] | None = None
 
 
 class PathsConfig(BaseModel):

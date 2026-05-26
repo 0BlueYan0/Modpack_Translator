@@ -1,4 +1,4 @@
-# Minecraft模組包翻譯器 v1.0.0
+# Minecraft模組包翻譯器 v1.1.0
 
 **Language / 語言：** [English](README.md) | 繁體中文
 
@@ -16,9 +16,8 @@
 |---|---|---|
 | [Git](https://git-scm.com/downloads) | 任意版本 | clone 倉庫所需 |
 | [Git LFS](https://git-lfs.com) | 任意版本 | **必須安裝** — LoRA 適配器（約 66 MB）透過 LFS 儲存 |
-| [Python](https://www.python.org/downloads/) | 3.10 或以上 | |
-| [uv](https://docs.astral.sh/uv/) | 最新版 | 本專案使用的 Python 套件管理器 |
-| NVIDIA GPU（可選） | 建議 CUDA 12.4 以上 | 強烈建議；純 CPU 可用但速度非常慢 |
+| [uv](https://docs.astral.sh/uv/) | 最新版 | 安裝並管理本專案使用的 Python runtime |
+| GPU（可選） | NVIDIA CUDA 或支援的 AMD ROCm | 強烈建議；純 CPU 可用但速度非常慢 |
 | 可用磁碟空間 | 約 6 GB | 適配器 ~66 MB（LFS）＋基礎模型 ~5 GB（自動下載） |
 
 ---
@@ -83,39 +82,53 @@ dir adapter\minecraft_translator_gemma4_e4b_lora.gguf
 git lfs pull
 ```
 
-### 第四步 — 安裝 Python 相依套件
+### 第四步 — 執行後端初始化
 
-```bash
-uv sync
+初始化腳本會安裝 uv 管理的 CPython 3.12、建立 `.venv/`、偵測硬體、安裝對應的本機推理後端、下載基礎模型，並寫入 `.runtime/backend.json`。使用者不需要另外安裝 Python。
+
+**Windows：**
+```bat
+setup_windows.bat
 ```
 
-此指令會建立 `.venv/` 虛擬環境並安裝所有套件。基礎模型（約 5 GB）**不在此時下載**，會在**首次翻譯執行時**自動下載。
+**macOS / Linux：**
+```bash
+./setup_unix.sh
+```
 
-> **注意：** `uv sync` 預設安裝 CPU 版的 `llama-cpp-python`。若要啟用 GPU 加速，請參閱下方的 [GPU 加速設定](#gpu-加速設定可選強烈建議)。
+硬體會自動選擇：
+
+| 硬體 | 後端 |
+|---|---|
+| NVIDIA | CUDA `llama-cpp-python[server]` wheel |
+| AMD Windows/Linux | AMD 預先編譯的 `llama.cpp` / `llama-server` binary |
+| 僅 CPU | CPU `llama-cpp-python[server]` wheel |
+
+重新執行初始化前請先關閉翻譯器。Windows 上正在執行的本機模型服務會鎖住 `.dll` 檔案，導致後端替換失敗。
 
 ---
 
-## GPU 加速設定（可選，強烈建議）
+## 後端初始化覆寫
 
-預設安裝的是 CPU 版 `llama-cpp-python`。若要使用 GPU 加速推理，請安裝預先編譯的 CUDA 安裝包：
+一般使用者用自動偵測即可。若要強制指定後端：
 
-**Windows（CUDA 12.4）：**
-```bash
-uv pip install "https://github.com/abetlen/llama-cpp-python/releases/download/v0.3.23-cu124/llama_cpp_python-0.3.23-py3-none-win_amd64.whl" --force-reinstall
+**Windows：**
+```bat
+setup_windows.bat --backend cuda
+setup_windows.bat --backend amd
+setup_windows.bat --backend cpu
 ```
 
-**Linux / WSL（CUDA 12.5）：**
+**macOS / Linux：**
 ```bash
-uv pip install "https://github.com/abetlen/llama-cpp-python/releases/download/v0.3.23-cu125/llama_cpp_python-0.3.23-py3-none-linux_x86_64.whl" --force-reinstall
+./setup_unix.sh --backend cuda
+./setup_unix.sh --backend amd
+./setup_unix.sh --backend cpu
 ```
 
-其他 CUDA 版本請至 [llama-cpp-python releases](https://github.com/abetlen/llama-cpp-python/releases) 選擇對應標籤（格式：`v0.3.23-cu<版本號>`）。
+程式會透過 OpenAI-compatible 本機 HTTP API 呼叫模型。若您自行啟動相容 server，也可以設定 `LLAMA_SERVER_URL`，例如 `http://127.0.0.1:8080/v1`。
 
-**僅 CPU 回退（不需要 GPU，速度較慢）：**
-```bash
-uv pip install llama-cpp-python --no-binary llama-cpp-python --force-reinstall
-```
-並將 `configs/model.yaml` 中的 `n_gpu_layers` 設為 `0`。
+若修改了 `configs/model.yaml` 中的基礎模型、LoRA、context size、GPU 層數或後端類型，請重新執行初始化腳本，讓 `.runtime/backend.json` 重新產生。
 
 ---
 
@@ -136,6 +149,11 @@ model:
   temperature: 0.05
   repeat_penalty: 1.1
   verbose: false
+  server_url: "http://127.0.0.1:8080/v1"
+  server_api_key: "llama.cpp"
+  server_model: "local-model"
+  auto_start_server: true
+  server_ready_timeout: 180
 ```
 
 ### `configs/paths.yaml`
@@ -158,13 +176,13 @@ paths:
 啟動圖形化介面：
 
 ```bash
-uv run main.py
+uv run python main.py
 ```
 
 **操作步驟：**
 
 1. **模組包資料夾** — 點擊「瀏覽…」選擇模組包實例目錄（包含 `mods/`、`config/` 的資料夾）。
-2. **模型設定** — 「基礎模型」留空可自動下載；LoRA 適配器路徑已預先填入。
+2. **模型設定** — 一般安裝流程已由初始化腳本設定本機模型服務。只有在重新產生後端設定時才需要修改這些欄位。
 3. **選項** — 勾選「翻譯模組 (.jar)」或「翻譯任務書」，並設定重試次數（預設 3）。
 4. **掃描** — 點擊「🔍 掃描模組包」，掃描結果面板顯示目標數量與樣本字串。
 5. **翻譯** — 點擊「▶ 開始翻譯」，進度條顯示百分比、速度、已用時間及預計剩餘時間。
@@ -181,7 +199,7 @@ uv run main.py
 ## CLI 使用方法
 
 ```bash
-uv run scripts/translate_modpack.py --modpack <路徑> [選項]
+uv run python scripts/translate_modpack.py --modpack <路徑> [選項]
 ```
 
 ### 參數說明
@@ -202,13 +220,13 @@ uv run scripts/translate_modpack.py --modpack <路徑> [選項]
 
 ```bash
 # 預覽將要翻譯的內容（不實際翻譯）
-uv run scripts/translate_modpack.py --modpack "C:/CurseForge/Instances/ATM10" --dry-run
+uv run python scripts/translate_modpack.py --modpack "C:/CurseForge/Instances/ATM10" --dry-run
 
 # 完整翻譯，失敗時最多重試 3 次
-uv run scripts/translate_modpack.py --modpack "C:/CurseForge/Instances/ATM10" --retry 3
+uv run python scripts/translate_modpack.py --modpack "C:/CurseForge/Instances/ATM10" --retry 3
 
 # 僅翻譯任務書
-uv run scripts/translate_modpack.py --modpack "C:/CurseForge/Instances/ATM10" --skip-mods --retry 2
+uv run python scripts/translate_modpack.py --modpack "C:/CurseForge/Instances/ATM10" --skip-mods --retry 2
 ```
 
 ---
@@ -261,13 +279,19 @@ uv run scripts/translate_modpack.py --modpack "C:/CurseForge/Instances/ATM10" --
 - 若模組包已完全翻譯，所有字串都會被略過。
 - 確認至少勾選了一個翻譯選項。
 
-**Q：模型載入失敗。**
+**Q：本機模型服務啟動失敗。**
+- 重新執行 `setup_windows.bat` 或 `./setup_unix.sh`。
+- 重新初始化前請先關閉翻譯器。Windows 上正在執行的 server 可能鎖住後端檔案。
+- 查看 `.runtime/llama-server.log`，裡面會有真正的 server 錯誤。
+
+**Q：模型檔案遺失。**
 - 確認 LoRA 適配器路徑正確（GUI 設定或 `configs/model.yaml`）。
-- 若基礎模型下載失敗，可手動從 HuggingFace 下載後，在設定中填入 `base_gguf_path`。
+- 若基礎模型下載失敗，可手動從 HuggingFace 下載，在 `configs/model.yaml` 填入 `base_gguf_path` 後重新執行初始化。
 
 **Q：GPU 沒有被使用 / 翻譯速度很慢。**
-- 安裝適合您 GPU 的 CUDA 安裝包（請參閱上方 GPU 加速設定）。
-- 確認 `n_gpu_layers` 設為 `-1`（全部層卸載至 GPU）。
+- 重新執行初始化，並檢查 `.runtime/backend.json` 內選到的後端。
+- 初始化前確認 `configs/model.yaml` 的 `n_gpu_layers` 設為 `-1`（全部層卸載至 GPU）。
+- AMD 加速使用 AMD 官方預編譯的 `llama.cpp` binary，支援範圍以 Windows/Linux 為主。
 
 **Q：部分字串回退為英文。**
 - 這發生在模型輸出未通過佔位符驗證時（例如翻譯後遺失了 `{0}` 格式代碼）。

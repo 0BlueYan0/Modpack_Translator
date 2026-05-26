@@ -114,7 +114,7 @@ _FMT_NAME_MAP: dict[str, str] = {
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Minecraft模組包翻譯器v1.0.0")
+        self.setWindowTitle("Minecraft模組包翻譯器v1.1.0")
         self.setMinimumWidth(760)
         self.setMinimumHeight(660)
 
@@ -233,7 +233,7 @@ class MainWindow(QMainWindow):
             "指定卸載至 GPU 的模型層數。\n"
             "-1 = 全部卸載至 GPU（最快）\n"
             " 0 = 僅使用 CPU（最慢但相容性最高）\n"
-            "需要 CUDA 版 llama-cpp-python。"
+            "修改後請重新執行初始化腳本，讓本機模型服務設定生效。"
         )
         gpu_row.addWidget(self.gpu_layers_spin)
         gpu_row.addWidget(QLabel("  （−1 = 全 GPU，0 = 僅 CPU）"))
@@ -712,3 +712,12 @@ class MainWindow(QMainWindow):
             self.translate_btn.setText("▶  開始翻譯")
             self.translate_btn.setStyleSheet("")
             self.progress_bar.setStyleSheet(_PROGRESS_STYLE_BLUE)
+
+    def closeEvent(self, event):
+        if self._translate_worker and self._translate_worker.isRunning():
+            self._translation_cancelled = True
+            self._translate_worker.cancel()
+            if not self._translate_worker.wait(10_000):
+                self._translate_worker.terminate()
+                self._translate_worker.wait(2_000)
+        event.accept()
