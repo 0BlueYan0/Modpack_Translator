@@ -193,6 +193,22 @@ def _server_log_tail(max_chars: int = 4000) -> str:
         return ""
 
 
+def _backend_help_from_log(detail: str) -> str:
+    lowered = detail.lower()
+    if "llama.dll" in lowered or "could not find module" in lowered:
+        return (
+            "\n\nLikely cause: the installed llama-cpp-python backend is broken "
+            "or one of llama.dll's dependencies is missing.\n"
+            "Fix on Windows:\n"
+            "1. Install Microsoft Visual C++ Redistributable 2015-2022 x64.\n"
+            "2. Install/update the NVIDIA driver and CUDA 12.x runtime if using CUDA.\n"
+            "3. Re-run setup_windows.bat --backend cuda.\n"
+            "4. If GPU setup still fails and slow translation is acceptable, run "
+            "setup_windows.bat --backend cpu."
+        )
+    return ""
+
+
 class GGUFTranslator:
     def __init__(self, cfg: ModelConfig, system_prompt: str) -> None:
         from openai import OpenAI
@@ -253,7 +269,7 @@ class GGUFTranslator:
 
         if not _server_ready(self._base_url):
             detail = _server_log_tail()
-            suffix = f"\n\nLast llama-server log:\n{detail}" if detail else ""
+            suffix = f"\n\nLast llama-server log:\n{detail}{_backend_help_from_log(detail)}" if detail else ""
             raise RuntimeError(
                 "Local model server is not reachable. Run setup_windows.bat or "
                 "setup_unix.sh first, or start llama-server manually and set "

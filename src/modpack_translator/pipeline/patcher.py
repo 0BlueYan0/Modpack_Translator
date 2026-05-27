@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from modpack_translator.pipeline.preprocessor import (
+    format_snbt_lang,
     parse_json_lang,
     parse_legacy_lang,
     parse_snbt_lang,
@@ -200,7 +201,24 @@ def write_inplace_snbt(
     target.parent.mkdir(parents=True, exist_ok=True)
     existing = read_existing_snbt(target)
     existing.update(translations)
-    target.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+    ordered = _ordered_snbt_lang(source_file, existing)
+    target.write_text(format_snbt_lang(ordered), encoding="utf-8")
+
+
+def _ordered_snbt_lang(source_file: Path, values: dict[str, str]) -> dict[str, str]:
+    ordered: dict[str, str] = {}
+    try:
+        source = parse_snbt_lang(source_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        source = {}
+
+    for key in source:
+        if key in values:
+            ordered[key] = values[key]
+    for key, value in values.items():
+        if key not in ordered:
+            ordered[key] = value
+    return ordered
 
 
 # ------------------------------------------------------------------ in-place legacy .lang

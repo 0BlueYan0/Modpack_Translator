@@ -189,27 +189,84 @@ def install_cuda_backend() -> None:
     elif system == "linux":
         wheel = CUDA_LINUX_WHEEL
     else:
-        print("CUDA wheel 目前只設定 Windows 和 Linux，改用 CPU 後端。")
-        install_cpu_backend()
-        return
-    run_allow_fail(["uv", "pip", "uninstall", "llama-cpp-python"])
+        raise RuntimeError("CUDA wheel is only configured for Windows and Linux.")
+    uninstall_llama_cpp_python()
     run(["uv", "pip", "install", *LLAMA_CPP_SERVER_DEPS])
-    run(["uv", "pip", "install", f"llama-cpp-python @ {wheel}"])
+    run([
+        "uv",
+        "pip",
+        "install",
+        "--reinstall",
+        "--no-cache",
+        f"llama-cpp-python @ {wheel}",
+    ])
 
 
 def install_cpu_backend() -> None:
-    run_allow_fail(["uv", "pip", "uninstall", "llama-cpp-python"])
+    uninstall_llama_cpp_python()
     run(["uv", "pip", "install", *LLAMA_CPP_SERVER_DEPS])
     run(
         [
             "uv",
             "pip",
             "install",
+            "--reinstall",
+            "--no-cache",
             f"llama-cpp-python[server]=={LLAMA_CPP_PYTHON_VERSION}",
             "--extra-index-url",
             CPU_WHEEL_INDEX,
         ]
     )
+
+
+def uninstall_llama_cpp_python() -> None:
+    run_allow_fail(["uv", "pip", "uninstall", "llama-cpp-python"])
+
+
+def validate_python_backend() -> None:
+    code = (
+        "import importlib.util; "
+        "import llama_cpp; "
+        "import llama_cpp.server; "
+        "spec = importlib.util.find_spec('llama_cpp.lib'); "
+        "print('llama-cpp-python import OK')"
+    )
+    run([sys.executable, "-c", code])
+
+
+def explain_cuda_failure(exc: BaseException) -> str:
+    return f"""
+
+CUDA 後端安裝後驗證失敗。
+
+程式不會把這種狀態當成 GPU 安裝成功。
+若改用 CPU 後端，翻譯仍可執行，但速度會慢非常多。
+
+偵測到的錯誤：
+  {exc}
+
+Windows 常見修復方式：
+  1. 安裝或修復 Microsoft Visual C++ Redistributable 2015-2022 x64：
+     https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist
+  2. 安裝或更新支援 CUDA 12.x 的 NVIDIA 驅動。
+  3. 若缺少 CUDA runtime DLL，請安裝 CUDA Toolkit 12.4 或 12.5。
+  4. 清除損壞的環境後重新安裝 CUDA 後端：
+       rmdir /s /q .venv
+       rmdir /s /q .runtime
+       setup_windows.bat --backend cuda
+  5. 若這台機器沒有 NVIDIA GPU，或你接受較慢速度，請明確使用 CPU：
+       setup_windows.bat --backend cpu
+
+說明：llama-cpp-python 的 CUDA wheel 需要相容的 CUDA/Python/系統 DLL 環境。
+"""
+
+
+def confirm_cpu_fallback() -> bool:
+    if not sys.stdin.isatty():
+        print("偵測到非互動式安裝；拒絕靜默改用 CPU 後端。")
+        return False
+    answer = input("是否改安裝 CPU 後端？速度會慢非常多。 [y/N]: ").strip().lower()
+    return answer in ("y", "yes")
 
 
 def download(url: str, dest: Path) -> None:
@@ -366,6 +423,7 @@ def main() -> None:
     args = parse_args()
     cfg = load_model_config()
     ensure_server_port_free(cfg)
+    requested_backend = args.backend
     backend = select_backend(args.backend)
     print(f"選擇的後端：{backend}")
 
@@ -373,13 +431,28 @@ def main() -> None:
     lora = resolve_lora(cfg)
 
     if backend == "cuda":
-        install_cuda_backend()
-        command = python_server_command(cfg, base_model, lora, int(cfg["n_gpu_layers"]))
+        try:
+            install_cuda_backend()
+            validate_python_backend()
+            command = python_server_command(cfg, base_model, lora, int(cfg["n_gpu_layers"]))
+        except (subprocess.CalledProcessError, RuntimeError) as exc:
+            print(explain_cuda_failure(exc))
+            if requested_backend == "cuda" or not confirm_cpu_fallback():
+                raise SystemExit(
+                    "GPU 後端安裝失敗。請先修復上方 CUDA 安裝問題；"
+                    "若接受較慢的 CPU 翻譯，請重新執行 setup_windows.bat --backend cpu。"
+                ) from exc
+            print("使用者已同意改用 CPU 後端。正在安裝 CPU backend...")
+            install_cpu_backend()
+            validate_python_backend()
+            backend = "cpu"
+            command = python_server_command(cfg, base_model, lora, 0)
     elif backend == "amd":
         server = install_amd_backend()
         command = binary_server_command(server, cfg, base_model, lora)
     else:
         install_cpu_backend()
+        validate_python_backend()
         command = python_server_command(cfg, base_model, lora, 0)
 
     write_backend_config(backend, command, cfg, base_model)

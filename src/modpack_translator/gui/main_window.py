@@ -5,7 +5,7 @@ from collections import deque
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QFont, QTextCursor
+from PySide6.QtGui import QFont, QIcon, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 
 # src/modpack_translator/gui/ → 上 4 層到專案根目錄
 _PROJECT_ROOT = Path(__file__).parents[3]
+_APP_ICON_PATH = _PROJECT_ROOT / "assets" / "icon" / "app_icon.png"
 
 from modpack_translator.config import load_config
 from modpack_translator.gui.worker import ScanWorker, TranslateWorker
@@ -114,7 +115,9 @@ _FMT_NAME_MAP: dict[str, str] = {
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Minecraft模組包翻譯器v1.1.0")
+        self.setWindowTitle("Minecraft模組包翻譯器v1.2.0")
+        if _APP_ICON_PATH.exists():
+            self.setWindowIcon(QIcon(str(_APP_ICON_PATH)))
         self.setMinimumWidth(760)
         self.setMinimumHeight(660)
 

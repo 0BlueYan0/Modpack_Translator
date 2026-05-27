@@ -1,4 +1,4 @@
-# Minecraft模組包翻譯器 v1.1.0
+# Minecraft模組包翻譯器 v1.2.0
 
 **Language / 語言：** [English](README.md) | 繁體中文
 

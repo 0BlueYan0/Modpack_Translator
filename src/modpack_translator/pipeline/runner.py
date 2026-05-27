@@ -27,6 +27,7 @@ from modpack_translator.pipeline.preprocessor import (
     diff_keys,
     encode,
     read_inline_snbt_text,
+    is_usable_translation,
     read_legacy_lang,
     read_bq_lang,
     read_json_lang,
@@ -91,12 +92,13 @@ def translate_dict(
             break
         src = en_dict[key]
         ck = cache_key(src)
-        if ck in cache:
+        if ck in cache and is_usable_translation(src, cache[ck]):
             result[key] = cache[ck]
             n_cached += 1
             if on_pair_done is not None:
                 on_pair_done(1)
             continue
+        cache.pop(ck, None)
         encoded, tokens = encode(src)
         final, ok = _translate_single(translator, encoded, tokens, retry_count, cancel_check)
         if ok:
@@ -260,11 +262,12 @@ def _process_patchouli(
             break
         src = source_strings[field]
         ck = cache_key(src)
-        if ck in cache:
+        if ck in cache and is_usable_translation(src, cache[ck]):
             page[field] = cache[ck]
             changed = True
             n_cached += 1
             continue
+        cache.pop(ck, None)
         encoded, tokens = encode(src)
         final, ok = _translate_single(translator, encoded, tokens, retry_count, cancel_check)
         if ok:
