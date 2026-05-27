@@ -18,6 +18,7 @@ A tool that automatically translates Minecraft modpack language files from Engli
 | [Git LFS](https://git-lfs.com) | any | **Required** — the LoRA adapter (~66 MB) is stored via LFS |
 | [uv](https://docs.astral.sh/uv/) | latest | Installs and manages this project's Python runtime |
 | GPU (optional) | NVIDIA CUDA or supported AMD ROCm | Strongly recommended; CPU works but is very slow |
+| [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) | 12.4 or newer | **Required for NVIDIA CUDA backend**; Game Ready/Studio Driver alone is not enough. cuDNN is not required |
 | Free disk space | ~6 GB | ~66 MB for adapter (LFS) + ~5 GB for base model (auto-download) |
 
 ---
@@ -79,6 +80,18 @@ dir adapter\minecraft_translator_gemma4_e4b_lora.gguf       # Windows
 # If the file is tiny (a pointer file), run:
 git lfs pull
 ```
+
+### NVIDIA GPU users — Install CUDA Toolkit
+
+If you want to use the CUDA backend, install **CUDA Toolkit 12.4 or newer** before running setup:
+
+```text
+https://developer.nvidia.com/cuda-downloads
+```
+
+The NVIDIA Game Ready/Studio Driver provides the driver library, but this project's CUDA `llama-cpp-python` wheel also needs CUDA runtime/cuBLAS libraries such as `cudart64_12.dll` and `cublas64_12.dll` on Windows. The setup script checks for these libraries and prints a clear error if they are missing.
+
+cuDNN is **not** required.
 
 ### Step 4 — Run the backend setup
 
@@ -280,6 +293,7 @@ uv run python scripts/translate_modpack.py --modpack "C:/CurseForge/Instances/AT
 **Q: Local model server fails to start.**
 - Re-run `setup_windows.bat` or `./setup_unix.sh`.
 - Close the app before re-running setup. A running server can lock backend files on Windows.
+- For NVIDIA CUDA backend, install CUDA Toolkit 12.4 or newer. cuDNN is not required.
 - Check `.runtime/llama-server.log` for the real server error.
 
 **Q: Model files are missing.**

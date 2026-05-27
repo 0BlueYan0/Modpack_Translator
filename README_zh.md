@@ -18,6 +18,7 @@
 | [Git LFS](https://git-lfs.com) | 任意版本 | **必須安裝** — LoRA 適配器（約 66 MB）透過 LFS 儲存 |
 | [uv](https://docs.astral.sh/uv/) | 最新版 | 安裝並管理本專案使用的 Python runtime |
 | GPU（可選） | NVIDIA CUDA 或支援的 AMD ROCm | 強烈建議；純 CPU 可用但速度非常慢 |
+| [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) | 12.4 或更新版本 | **NVIDIA CUDA 後端必須安裝**；只有 Game Ready/Studio Driver 不夠。cuDNN 不需要 |
 | 可用磁碟空間 | 約 6 GB | 適配器 ~66 MB（LFS）＋基礎模型 ~5 GB（自動下載） |
 
 ---
@@ -81,6 +82,18 @@ dir adapter\minecraft_translator_gemma4_e4b_lora.gguf
 # 若檔案太小（指標檔），請執行：
 git lfs pull
 ```
+
+### NVIDIA GPU 使用者 — 安裝 CUDA Toolkit
+
+如果要使用 CUDA 後端，請在執行初始化前先安裝 **CUDA Toolkit 12.4 或更新版本**：
+
+```text
+https://developer.nvidia.com/cuda-downloads
+```
+
+NVIDIA Game Ready/Studio Driver 只提供驅動程式函式庫；本專案使用的 CUDA `llama-cpp-python` wheel 還需要 CUDA runtime/cuBLAS 函式庫，例如 Windows 上的 `cudart64_12.dll` 與 `cublas64_12.dll`。初始化腳本會檢查這些函式庫，缺少時會印出明確錯誤訊息。
+
+cuDNN **不需要**安裝。
 
 ### 第四步 — 執行後端初始化
 
@@ -282,6 +295,7 @@ uv run python scripts/translate_modpack.py --modpack "C:/CurseForge/Instances/AT
 **Q：本機模型服務啟動失敗。**
 - 重新執行 `setup_windows.bat` 或 `./setup_unix.sh`。
 - 重新初始化前請先關閉翻譯器。Windows 上正在執行的 server 可能鎖住後端檔案。
+- NVIDIA CUDA 後端需要 CUDA Toolkit 12.4 或更新版本。cuDNN 不需要。
 - 查看 `.runtime/llama-server.log`，裡面會有真正的 server 錯誤。
 
 **Q：模型檔案遺失。**

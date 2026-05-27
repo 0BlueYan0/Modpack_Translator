@@ -37,6 +37,14 @@ CUDA_LINUX_WHEEL = (
     "v0.3.23-cu124/llama_cpp_python-0.3.23-py3-none-linux_x86_64.whl"
 )
 CPU_WHEEL_INDEX = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
+CUDA_RUNTIME_LIBS = {
+    "windows": ("cudart64_12.dll", "cublas64_12.dll"),
+    "linux": ("libcudart.so.12", "libcublas.so.12"),
+}
+CUDA_DRIVER_LIBS = {
+    "windows": ("nvcuda.dll",),
+    "linux": ("libcuda.so.1",),
+}
 
 AMD_WIN_ZIP = (
     "https://repo.radeon.com/rocm/llama.cpp/windows/rocm-rel-7.2.1/"
@@ -46,6 +54,10 @@ AMD_LINUX_ZIP = (
     "https://repo.radeon.com/rocm/llama.cpp/linux/rocm-rel-7.2.1/"
     "llama-b8407-ubuntu-24.04-rocm-7.2.1-gfx110X-gfx115X-gfx120X-x64.zip"
 )
+
+
+class CudaDependencyError(RuntimeError):
+    pass
 
 
 def parse_args() -> argparse.Namespace:
@@ -115,6 +127,12 @@ def command_output(cmd: list[str]) -> str:
         return ""
 
 
+def setup_command(backend: str) -> str:
+    if platform.system().lower() == "windows":
+        return f"setup_windows.bat --backend {backend}"
+    return f"./setup_unix.sh --backend {backend}"
+
+
 def load_model_config() -> dict:
     text = (PROJECT_ROOT / "configs" / "model.yaml").read_text(encoding="utf-8")
     in_model = False
@@ -182,6 +200,65 @@ def select_backend(requested: str) -> str:
     return "cpu"
 
 
+def can_load_library(name: str) -> bool:
+    import ctypes
+
+    loader = ctypes.WinDLL if platform.system().lower() == "windows" else ctypes.CDLL
+    try:
+        loader(name)
+        return True
+    except OSError:
+        return False
+
+
+def explain_missing_cuda_toolkit(missing_driver: list[str], missing_runtime: list[str]) -> str:
+    missing_lines = "\n".join(f"  - {name}" for name in [*missing_driver, *missing_runtime])
+    cuda_setup_cmd = setup_command("cuda")
+    cpu_setup_cmd = setup_command("cpu")
+    driver_note = ""
+    if missing_driver:
+        driver_note = (
+            "\nNVIDIA driver library is missing. Install or repair the NVIDIA Game Ready/"
+            "Studio driver first.\n"
+        )
+    return f"""
+
+CUDA 後端缺少必要的 NVIDIA/CUDA 動態函式庫。
+
+缺少：
+{missing_lines}
+{driver_note}
+NVIDIA CUDA 後端需要：
+  1. 支援 CUDA 12.x 的 NVIDIA 顯示卡驅動。
+  2. CUDA Toolkit 12.4 或更新版本提供的 CUDA runtime/cuBLAS DLL/so。
+
+請安裝 CUDA Toolkit 12.4 或更新版本後重新執行：
+  {cuda_setup_cmd}
+
+Linux 使用者請安裝發行版對應的 CUDA Toolkit 12.4+ 套件，或確保
+libcudart.so.12 與 libcublas.so.12 在系統動態連結器搜尋路徑中。
+
+cuDNN 不需要安裝。llama.cpp CUDA 後端不使用 cuDNN。
+
+若你接受較慢速度，請改用 CPU 後端：
+  {cpu_setup_cmd}
+"""
+
+
+def validate_cuda_runtime_libraries() -> None:
+    system = platform.system().lower()
+    driver_libs = CUDA_DRIVER_LIBS.get(system, ())
+    runtime_libs = CUDA_RUNTIME_LIBS.get(system, ())
+    if not runtime_libs:
+        return
+
+    missing_driver = [name for name in driver_libs if not can_load_library(name)]
+    missing_runtime = [name for name in runtime_libs if not can_load_library(name)]
+    if missing_driver or missing_runtime:
+        raise CudaDependencyError(explain_missing_cuda_toolkit(missing_driver, missing_runtime))
+    print("CUDA runtime dependency check OK.")
+
+
 def install_cuda_backend() -> None:
     system = platform.system().lower()
     if system == "windows":
@@ -190,6 +267,7 @@ def install_cuda_backend() -> None:
         wheel = CUDA_LINUX_WHEEL
     else:
         raise RuntimeError("CUDA wheel is only configured for Windows and Linux.")
+    validate_cuda_runtime_libraries()
     uninstall_llama_cpp_python()
     run(["uv", "pip", "install", *LLAMA_CPP_SERVER_DEPS])
     run([
@@ -249,7 +327,7 @@ Windows 常見修復方式：
   1. 安裝或修復 Microsoft Visual C++ Redistributable 2015-2022 x64：
      https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist
   2. 安裝或更新支援 CUDA 12.x 的 NVIDIA 驅動。
-  3. 若缺少 CUDA runtime DLL，請安裝 CUDA Toolkit 12.4 或 12.5。
+  3. 若缺少 CUDA runtime/cuBLAS DLL，請安裝 CUDA Toolkit 12.4 或更新版本。
   4. 清除損壞的環境後重新安裝 CUDA 後端：
        rmdir /s /q .venv
        rmdir /s /q .runtime
@@ -258,6 +336,7 @@ Windows 常見修復方式：
        setup_windows.bat --backend cpu
 
 說明：llama-cpp-python 的 CUDA wheel 需要相容的 CUDA/Python/系統 DLL 環境。
+cuDNN 不需要安裝。
 """
 
 
@@ -435,12 +514,24 @@ def main() -> None:
             install_cuda_backend()
             validate_python_backend()
             command = python_server_command(cfg, base_model, lora, int(cfg["n_gpu_layers"]))
+        except CudaDependencyError as exc:
+            print(exc)
+            if requested_backend == "cuda" or not confirm_cpu_fallback():
+                raise SystemExit(
+                    "GPU 後端安裝失敗。請先修復上方 CUDA 安裝問題；"
+                    f"若接受較慢的 CPU 翻譯，請重新執行 {setup_command('cpu')}。"
+                ) from exc
+            print("使用者已同意改用 CPU 後端。正在安裝 CPU backend...")
+            install_cpu_backend()
+            validate_python_backend()
+            backend = "cpu"
+            command = python_server_command(cfg, base_model, lora, 0)
         except (subprocess.CalledProcessError, RuntimeError) as exc:
             print(explain_cuda_failure(exc))
             if requested_backend == "cuda" or not confirm_cpu_fallback():
                 raise SystemExit(
                     "GPU 後端安裝失敗。請先修復上方 CUDA 安裝問題；"
-                    "若接受較慢的 CPU 翻譯，請重新執行 setup_windows.bat --backend cpu。"
+                    f"若接受較慢的 CPU 翻譯，請重新執行 {setup_command('cpu')}。"
                 ) from exc
             print("使用者已同意改用 CPU 後端。正在安裝 CPU backend...")
             install_cpu_backend()
