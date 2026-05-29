@@ -7,11 +7,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from modpack_translator.pipeline.preprocessor import (
-    PATCHOULI_TEXT_FIELDS,
     diff_keys,
     parse_json_lang,
     parse_legacy_lang,
     parse_snbt_lang,
+    read_patchouli_text,
     read_inline_snbt_text,
 )
 
@@ -201,11 +201,7 @@ class ModpackScanner:
         except (json.JSONDecodeError, KeyError, UnicodeDecodeError):
             return False
 
-        source = {
-            field: source_page[field]
-            for field in PATCHOULI_TEXT_FIELDS
-            if field in source_page and isinstance(source_page[field], str)
-        }
+        source = read_patchouli_text(source_page)
         if not source:
             return False
 
@@ -215,11 +211,7 @@ class ModpackScanner:
                 target_page = json.loads(zf.read(target_path).decode("utf-8-sig"))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 target_page = {}
-            existing = {
-                field: target_page[field]
-                for field in PATCHOULI_TEXT_FIELDS
-                if field in target_page and isinstance(target_page[field], str)
-            }
+            existing = read_patchouli_text(target_page)
         return bool(diff_keys(source, existing))
 
     # ---------------------------------------------------------- local lang files

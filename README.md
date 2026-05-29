@@ -1,4 +1,4 @@
-# Minecraft Modpack Translator v1.2.0
+# Minecraft Modpack Translator v1.3.0
 
 **Language / 語言：** English | [繁體中文](README_zh.md)
 

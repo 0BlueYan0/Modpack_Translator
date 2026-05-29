@@ -115,7 +115,7 @@ _FMT_NAME_MAP: dict[str, str] = {
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Minecraft模組包翻譯器v1.2.0")
+        self.setWindowTitle("Minecraft模組包翻譯器v1.3.0")
         if _APP_ICON_PATH.exists():
             self.setWindowIcon(QIcon(str(_APP_ICON_PATH)))
         self.setMinimumWidth(760)

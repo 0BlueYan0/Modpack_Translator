@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +23,7 @@ from modpack_translator.pipeline.patcher import (
 )
 from modpack_translator.pipeline.postprocessor import process
 from modpack_translator.pipeline.preprocessor import (
-    PATCHOULI_TEXT_FIELDS,
+    classify_translation_entry,
     decode,
     diff_keys,
     encode,
@@ -32,7 +33,9 @@ from modpack_translator.pipeline.preprocessor import (
     read_bq_lang,
     read_json_lang,
     read_patchouli_page,
+    read_patchouli_text,
     read_snbt_lang,
+    write_patchouli_text,
 )
 from modpack_translator.pipeline.scanner import TranslationTarget
 
@@ -43,6 +46,25 @@ def cache_key(text: str) -> str:
 
 # 用來偵測「有無可翻譯的真實字母內容」
 _HAS_LETTER_RE = re.compile(r"[A-Za-z]")
+_PATCHOULI_SEGMENT_SPLIT_RE = re.compile(r"(\$\((?:p|br2?|li\d*)\)|\\?@[A-Z][A-Z0-9_]*@)")
+_GENERIC_SEGMENT_SPLIT_RE = re.compile(r"(\r?\n+|\\?@(?:L|PAGE)@)")
+_SENTENCE_SEGMENT_SPLIT_RE = re.compile(r"(?<=[.!?])(\s+)")
+_STATIC_TRANSLATIONS = {
+    "Bosses": "首領",
+    "Cat": "貓",
+    "Chicken": "雞",
+    "Cow": "牛",
+    "Pig": "豬",
+    "Sheep": "綿羊",
+    "Villager": "村民",
+}
+_STATIC_PATTERNS: tuple[tuple[re.Pattern[str], dict[str, str], str], ...] = (
+    (
+        re.compile(r"^(%s) Pacifies (Endermen|Phantoms|Piglins) when worn$"),
+        {"Endermen": "終界使者", "Phantoms": "夜魅", "Piglins": "豬布林"},
+        "{0} 穿戴時會安撫{1}",
+    ),
+)
 
 
 def _translate_single(
@@ -72,6 +94,142 @@ def _translate_single(
     return encoded, False
 
 
+def _translate_validated(
+    translator: Any,
+    source: str,
+    retry_count: int,
+    cancel_check=None,
+) -> tuple[str, bool]:
+    static = _static_translation(source)
+    if static is not None and is_usable_translation(source, static):
+        return static, True
+
+    encoded, tokens = encode(source)
+    final, ok = _translate_single(translator, encoded, tokens, retry_count, cancel_check)
+    if ok and is_usable_translation(source, final):
+        return final, True
+    return source, False
+
+
+def _static_translation(source: str) -> str | None:
+    text = source.strip()
+    if text in _STATIC_TRANSLATIONS:
+        return source.replace(text, _STATIC_TRANSLATIONS[text])
+    for pattern, mapping, template in _STATIC_PATTERNS:
+        match = pattern.fullmatch(text)
+        if not match:
+            continue
+        translated = template.format(match.group(1), mapping[match.group(2)])
+        return source.replace(text, translated)
+    return None
+
+
+def _translate_segmented_text(
+    translator: Any,
+    source: str,
+    retry_count: int,
+    cancel_check=None,
+) -> tuple[str, bool]:
+    final, ok = _translate_validated(translator, source, retry_count, cancel_check)
+    if ok:
+        return final, True
+
+    parts = _GENERIC_SEGMENT_SPLIT_RE.split(source)
+    if len(parts) <= 1:
+        return _translate_sentence_segmented_text(translator, source, retry_count, cancel_check)
+
+    translated_parts: list[str] = []
+    changed = False
+    for part in parts:
+        if not part:
+            continue
+        if _GENERIC_SEGMENT_SPLIT_RE.fullmatch(part):
+            translated_parts.append(part)
+            continue
+        if not part.strip():
+            translated_parts.append(part)
+            continue
+        part_final, part_ok = _translate_validated(translator, part, retry_count, cancel_check)
+        if not part_ok:
+            return source, False
+        translated_parts.append(part_final)
+        changed = changed or part_final != part
+
+    combined = "".join(translated_parts)
+    if changed and is_usable_translation(source, combined):
+        return combined, True
+    final, ok = _translate_sentence_segmented_text(translator, source, retry_count, cancel_check)
+    if ok:
+        return final, True
+    return source, False
+
+
+def _translate_sentence_segmented_text(
+    translator: Any,
+    source: str,
+    retry_count: int,
+    cancel_check=None,
+) -> tuple[str, bool]:
+    if len(source) < 120:
+        return source, False
+    parts = _SENTENCE_SEGMENT_SPLIT_RE.split(source)
+    if len(parts) <= 1:
+        return source, False
+
+    translated_parts: list[str] = []
+    changed = False
+    for part in parts:
+        if not part:
+            continue
+        if _SENTENCE_SEGMENT_SPLIT_RE.fullmatch(part) or not part.strip():
+            translated_parts.append(part)
+            continue
+        part_final, part_ok = _translate_validated(translator, part, retry_count, cancel_check)
+        if not part_ok:
+            return source, False
+        translated_parts.append(part_final)
+        changed = changed or part_final != part
+
+    combined = "".join(translated_parts)
+    if changed and is_usable_translation(source, combined):
+        return combined, True
+    return source, False
+
+
+def _translate_patchouli_text(
+    translator: Any,
+    source: str,
+    retry_count: int,
+    cancel_check=None,
+) -> tuple[str, bool]:
+    final, ok = _translate_segmented_text(translator, source, retry_count, cancel_check)
+    if ok:
+        return final, True
+
+    parts = _PATCHOULI_SEGMENT_SPLIT_RE.split(source)
+    if len(parts) <= 1:
+        return source, False
+
+    translated_parts: list[str] = []
+    changed = False
+    for part in parts:
+        if not part:
+            continue
+        if _PATCHOULI_SEGMENT_SPLIT_RE.fullmatch(part):
+            translated_parts.append(part)
+            continue
+        part_final, part_ok = _translate_segmented_text(translator, part, retry_count, cancel_check)
+        if not part_ok:
+            return source, False
+        translated_parts.append(part_final)
+        changed = changed or part_final != part
+
+    combined = "".join(translated_parts)
+    if changed and is_usable_translation(source, combined):
+        return combined, True
+    return source, False
+
+
 def translate_dict(
     en_dict: dict[str, str],
     zh_existing: dict[str, str],
@@ -91,6 +249,11 @@ def translate_dict(
         if cancel_check is not None and cancel_check():
             break
         src = en_dict[key]
+        if classify_translation_entry(key, src) != "translate":
+            result[key] = src
+            if on_pair_done is not None:
+                on_pair_done(1)
+            continue
         ck = cache_key(src)
         if ck in cache and is_usable_translation(src, cache[ck]):
             result[key] = cache[ck]
@@ -99,8 +262,7 @@ def translate_dict(
                 on_pair_done(1)
             continue
         cache.pop(ck, None)
-        encoded, tokens = encode(src)
-        final, ok = _translate_single(translator, encoded, tokens, retry_count, cancel_check)
+        final, ok = _translate_segmented_text(translator, src, retry_count, cancel_check)
         if ok:
             result[key] = final
             cache[ck] = final
@@ -122,7 +284,7 @@ def read_target_strings(target: TranslationTarget) -> dict[str, str]:
         return read_legacy_lang(target.source_file, target.path_in_jar)
     elif target.format == "patchouli_json":
         page = read_patchouli_page(target.source_file, target.path_in_jar)
-        return {f: page[f] for f in PATCHOULI_TEXT_FIELDS if f in page and isinstance(page[f], str)}
+        return read_patchouli_text(page)
     elif target.format in ("ftbq_snbt", "heracles_snbt"):
         return read_snbt_lang(target.source_file)
     elif target.format in ("ftbq_inline_snbt", "heracles_inline_snbt"):
@@ -142,11 +304,7 @@ def read_existing_target(target: TranslationTarget, lang_code: str) -> dict[str,
             return read_jar_legacy_lang(target.source_file, target.target_path_in_jar)
         if target.format == "patchouli_json":
             page = read_jar_json_file(target.source_file, target.target_path_in_jar)
-            return {
-                f: page[f]
-                for f in PATCHOULI_TEXT_FIELDS
-                if f in page and isinstance(page[f], str)
-            }
+            return read_patchouli_text(page)
         return {}
 
     if target.format in ("ftbq_snbt", "heracles_snbt"):
@@ -237,46 +395,43 @@ def _process_patchouli(
     target_path = target.target_path_in_jar or target.path_in_jar
     if not target_path:
         raise ValueError(f"Missing Patchouli target path for {target.source_file}")
-    page = read_jar_json_file(target.source_file, target_path) if target.output_mode == "jar_inject" else {}
-    if not page:
-        page = dict(source_page)
+    existing_page = read_jar_json_file(target.source_file, target_path) if target.output_mode == "jar_inject" else {}
+    page = deepcopy(source_page)
+    source_strings = read_patchouli_text(source_page)
+    existing_strings = read_patchouli_text(existing_page) if existing_page else {}
+    for path_key, existing_value in existing_strings.items():
+        source_value = source_strings.get(path_key)
+        if source_value is not None and is_usable_translation(source_value, existing_value):
+            write_patchouli_text(page, path_key, existing_value)
 
-    source_strings = {
-        field: source_page[field]
-        for field in PATCHOULI_TEXT_FIELDS
-        if field in source_page and isinstance(source_page[field], str)
-    }
-    existing_strings = {
-        field: page[field]
-        for field in PATCHOULI_TEXT_FIELDS
-        if field in page and isinstance(page[field], str)
-    }
+    existing_strings = read_patchouli_text(page)
     to_translate = diff_keys(source_strings, existing_strings)
 
-    changed = False
+    changed = page != existing_page
     failed: dict[str, str] = {}
     n_translated = n_cached = n_fallback = 0
 
-    for field in to_translate:
+    for path_key in to_translate:
         if cancel_check is not None and cancel_check():
             break
-        src = source_strings[field]
+        src = source_strings[path_key]
         ck = cache_key(src)
         if ck in cache and is_usable_translation(src, cache[ck]):
-            page[field] = cache[ck]
+            write_patchouli_text(page, path_key, cache[ck])
             changed = True
             n_cached += 1
+            if on_pair_done is not None:
+                on_pair_done(1)
             continue
         cache.pop(ck, None)
-        encoded, tokens = encode(src)
-        final, ok = _translate_single(translator, encoded, tokens, retry_count, cancel_check)
+        final, ok = _translate_patchouli_text(translator, src, retry_count, cancel_check)
         if ok:
-            page[field] = final
+            write_patchouli_text(page, path_key, final)
             cache[ck] = final
             changed = True
             n_translated += 1
         else:
-            failed[field] = src
+            failed[path_key] = src
             n_fallback += 1
         if on_pair_done is not None:
             on_pair_done(1)
@@ -289,11 +444,34 @@ def _process_patchouli(
     return n_translated, n_cached, n_fallback, failed
 
 
+def failed_target_name(target: TranslationTarget) -> str:
+    location = target.path_in_jar
+    if not location and target.target_file:
+        location = str(target.target_file)
+    if not location:
+        location = str(target.source_file)
+    return f"{target.mod_id}__{target.format}__{location}"
+
+
+_FAILED_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _clear_failed_items(output_dir: Path) -> None:
+    if not output_dir.is_dir():
+        return
+    for file_path in output_dir.rglob("*.txt"):
+        try:
+            file_path.unlink()
+        except OSError:
+            pass
+
+
 def _write_failed_items(
     failed_by_target: dict[str, dict[str, str]],
     output_dir: Path,
 ) -> int:
     """將失敗項目分檔寫入 output_dir。無失敗項目時不建立資料夾，回傳 0。"""
+    _clear_failed_items(output_dir)
     total_failed = sum(len(v) for v in failed_by_target.values())
     if total_failed == 0:
         return 0
@@ -303,10 +481,19 @@ def _write_failed_items(
     for target_name, items in sorted(failed_by_target.items()):
         if not items:
             continue
-        safe_name = target_name.replace("/", "_").replace("\\", "_")
-        file_path = output_dir / f"{safe_name}.txt"
+        category = _failed_item_category(target_name, items)
+        safe_name = _FAILED_FILENAME_RE.sub("_", target_name).strip("._")
+        if not safe_name:
+            safe_name = "failed_items"
+        if len(safe_name) > 180:
+            digest = hashlib.sha1(target_name.encode("utf-8")).hexdigest()[:12]
+            safe_name = f"{safe_name[:167]}_{digest}"
+        category_dir = output_dir / category
+        category_dir.mkdir(parents=True, exist_ok=True)
+        file_path = category_dir / f"{safe_name}.txt"
         lines = [
             f"失敗項目清單：{target_name}",
+            f"分類：{category}",
             f"失敗數量：{len(items)} 個",
             "",
         ]
@@ -318,3 +505,28 @@ def _write_failed_items(
         file_path.write_text("\n".join(lines), encoding="utf-8")
         written += 1
     return written
+
+
+def _failed_item_category(target_name: str, items: dict[str, str]) -> str:
+    if "__patchouli_json__" in target_name:
+        return "markup_or_book_text"
+    classifications = {classify_translation_entry(key, src) for key, src in items.items()}
+    if classifications <= {"copy", "skip"}:
+        return "copy_or_skip_noise"
+    values = list(items.values())
+    if all(_looks_failed_fragment(value) for value in values):
+        return "short_fragments"
+    if any(_looks_markup_heavy(value) for value in values):
+        return "markup_or_book_text"
+    return "natural_text"
+
+
+def _looks_failed_fragment(value: str) -> bool:
+    text = value.strip()
+    if len(text) <= 24:
+        return True
+    return bool(re.search(r"%\d*\$?[sdifcbxo]|%[sdifcbxo]", text)) and len(text) <= 80
+
+
+def _looks_markup_heavy(value: str) -> bool:
+    return value.count("$(") + value.count("[#](") + value.count("://") >= 2

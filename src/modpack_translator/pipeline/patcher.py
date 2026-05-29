@@ -36,6 +36,15 @@ def write_inplace_json(
 # ------------------------------------------------------------------ jar injection
 
 _JAR_SIGNATURE_SUFFIXES = (".SF", ".DSA", ".RSA", ".EC")
+_MODONOMICON_UNIFONT_PATH = "assets/modonomicon/font/include/unifont.json"
+_MODONOMICON_UNIFONT_FALLBACK = {
+    "providers": [
+        {
+            "type": "reference",
+            "id": "minecraft:include/unifont",
+        },
+    ],
+}
 
 
 def backup_mods(game_root: Path) -> int:
@@ -80,6 +89,47 @@ def backup_quest_configs(game_root: Path) -> int:
             shutil.copy2(source, destination)
         count += 1
     return count
+
+
+def patch_modonomicon_unicode_fonts(game_root: Path) -> int:
+    """Wire Modonomicon's empty unifont include to Minecraft's CJK-capable unifont."""
+    mods_dir = game_root / "mods"
+    if not mods_dir.is_dir():
+        return 0
+
+    patched = 0
+    for jar_path in sorted(mods_dir.glob("*.jar")):
+        if _patch_modonomicon_unicode_font(jar_path):
+            patched += 1
+    return patched
+
+
+def _patch_modonomicon_unicode_font(jar_path: Path) -> bool:
+    try:
+        with zipfile.ZipFile(jar_path) as zf:
+            if _MODONOMICON_UNIFONT_PATH not in zf.namelist():
+                return False
+            raw = zf.read(_MODONOMICON_UNIFONT_PATH).decode("utf-8-sig")
+            data = json.loads(raw)
+    except (zipfile.BadZipFile, OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+
+    if not _needs_modonomicon_unicode_font_patch(data):
+        return False
+
+    payload = json.dumps(_MODONOMICON_UNIFONT_FALLBACK, ensure_ascii=False, indent=2).encode("utf-8")
+    try:
+        _rewrite_jar(jar_path, {_MODONOMICON_UNIFONT_PATH: payload})
+    except OSError:
+        return False
+    return True
+
+
+def _needs_modonomicon_unicode_font_patch(data: Any) -> bool:
+    if not isinstance(data, dict):
+        return False
+    providers = data.get("providers")
+    return isinstance(providers, list) and not providers
 
 
 def read_jar_json_lang(jar_path: Path, path_in_jar: str | None) -> dict[str, str]:
@@ -199,18 +249,28 @@ def write_inplace_snbt(
 ) -> None:
     target = target_file or source_file.parent / f"{lang_code}.snbt"
     target.parent.mkdir(parents=True, exist_ok=True)
+    source_values = _read_snbt_source(source_file)
     existing = read_existing_snbt(target)
-    existing.update(translations)
-    ordered = _ordered_snbt_lang(source_file, existing)
+    if source_values:
+        existing = {key: value for key, value in existing.items() if key in source_values}
+        translations = {key: value for key, value in translations.items() if key in source_values}
+    merged = dict(source_values)
+    merged.update(existing)
+    merged.update(translations)
+    ordered = _ordered_snbt_lang(source_file, merged)
     target.write_text(format_snbt_lang(ordered), encoding="utf-8")
+
+
+def _read_snbt_source(source_file: Path) -> dict[str, str]:
+    try:
+        return parse_snbt_lang(source_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return {}
 
 
 def _ordered_snbt_lang(source_file: Path, values: dict[str, str]) -> dict[str, str]:
     ordered: dict[str, str] = {}
-    try:
-        source = parse_snbt_lang(source_file.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError):
-        source = {}
+    source = _read_snbt_source(source_file)
 
     for key in source:
         if key in values:

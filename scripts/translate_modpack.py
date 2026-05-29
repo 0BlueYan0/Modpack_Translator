@@ -10,10 +10,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from modpack_translator.config import load_config
-from modpack_translator.pipeline.patcher import backup_mods, backup_quest_configs
+from modpack_translator.pipeline.patcher import (
+    backup_mods,
+    backup_quest_configs,
+    patch_modonomicon_unicode_fonts,
+)
 from modpack_translator.pipeline.preprocessor import diff_keys
 from modpack_translator.pipeline.runner import (
     _write_failed_items,
+    failed_target_name,
     process_target,
     read_existing_target,
     read_target_strings,
@@ -148,11 +153,16 @@ def main():
         _dry_run_report(all_targets, cfg.language.code)
         return
 
-    if any(t.output_mode == "jar_inject" for t in all_targets):
-        backed_up = backup_mods(resolve_game_root(modpack_path))
+    game_root = resolve_game_root(modpack_path)
+    if any(t.output_mode == "jar_inject" for t in all_targets) or not args.skip_mods:
+        backed_up = backup_mods(game_root)
         print(f"已備份 {backed_up} 個原始模組 jar 至 mods_bak/")
+    if not args.skip_mods:
+        patched_fonts = patch_modonomicon_unicode_fonts(game_root)
+        if patched_fonts:
+            print(f"已修補 {patched_fonts} 個 Modonomicon Unicode 字型 fallback")
     if any(t.output_mode == "in_place" for t in all_targets):
-        backed_up = backup_quest_configs(resolve_game_root(modpack_path))
+        backed_up = backup_quest_configs(game_root)
         print(f"已備份 {backed_up} 個任務/設定資料夾至 quests_bak/")
 
     print("\n正在連線或啟動本機模型服務…")
@@ -173,7 +183,7 @@ def main():
                 total_cached += n_c
                 total_fallback += n_f
                 if failed:
-                    failed_by_target[f"{target.mod_id}__{target.format}"] = failed
+                    failed_by_target[failed_target_name(target)] = failed
             except Exception as exc:
                 tqdm.write(f"[警告] 略過 {target.mod_id}/{target.format}：{exc}")
                 continue
