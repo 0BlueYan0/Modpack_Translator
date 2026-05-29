@@ -4,7 +4,7 @@ import time
 from collections import deque
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QSettings, QTimer
 from PySide6.QtGui import QFont, QIcon, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
@@ -30,74 +30,19 @@ _PROJECT_ROOT = Path(__file__).parents[3]
 _APP_ICON_PATH = _PROJECT_ROOT / "assets" / "icon" / "app_icon.png"
 
 from modpack_translator.config import load_config
+from modpack_translator.gui.theme import apply_theme, restyle
 from modpack_translator.gui.worker import ScanWorker, TranslateWorker
 
 
 def _make_help_label(tooltip_text: str) -> QPushButton:
     btn = QPushButton("?")
+    btn.setObjectName("helpButton")
     btn.setFixedSize(22, 22)
     btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
     btn.setCursor(Qt.CursorShape.WhatsThisCursor)
     btn.setToolTip(tooltip_text)
-    btn.setStyleSheet("""
-        QPushButton {
-            color: #2980b9;
-            font-weight: bold;
-            border: 1.5px solid #2980b9;
-            border-radius: 11px;
-            background: transparent;
-            font-size: 12px;
-        }
-        QPushButton:hover {
-            background: #d6eaf8;
-            color: #1a5276;
-            border-color: #1a5276;
-        }
-    """)
     return btn
 
-
-_PROGRESS_STYLE_BLUE = """
-    QProgressBar {
-        border: 1px solid #bbb;
-        border-radius: 4px;
-        text-align: center;
-        font-size: 13px;
-        font-weight: bold;
-    }
-    QProgressBar::chunk {
-        background-color: #2980b9;
-        border-radius: 3px;
-    }
-"""
-
-_PROGRESS_STYLE_GREEN = """
-    QProgressBar {
-        border: 1px solid #bbb;
-        border-radius: 4px;
-        text-align: center;
-        font-size: 13px;
-        font-weight: bold;
-    }
-    QProgressBar::chunk {
-        background-color: #27ae60;
-        border-radius: 3px;
-    }
-"""
-
-_PROGRESS_STYLE_ORANGE = """
-    QProgressBar {
-        border: 1px solid #bbb;
-        border-radius: 4px;
-        text-align: center;
-        font-size: 13px;
-        font-weight: bold;
-    }
-    QProgressBar::chunk {
-        background-color: #e67e22;
-        border-radius: 3px;
-    }
-"""
 
 _FMT_NAME_MAP: dict[str, str] = {
     "json_lang":            "JSON 語言檔",
@@ -119,7 +64,9 @@ class MainWindow(QMainWindow):
         if _APP_ICON_PATH.exists():
             self.setWindowIcon(QIcon(str(_APP_ICON_PATH)))
         self.setMinimumWidth(760)
-        self.setMinimumHeight(660)
+        # 最小高度需容納完整版面（含 log 區的最小高度），否則底部輸出會被裁切
+        self.setMinimumHeight(820)
+        self.resize(900, 880)
 
         self._scan_targets: list = []
         self._scan_fmt_counts: dict = {}
@@ -157,16 +104,57 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+        # 主題：讀取使用者上次的選擇，否則跟隨系統
+        self._settings = QSettings("koudesuk", "ModpackTranslator")
+        saved = self._settings.value("ui/theme", "")
+        self._theme_mode = saved if saved in ("light", "dark") else self._detect_system_theme()
+
         self._build_ui()
+        apply_theme(self._theme_mode)
+        self._update_theme_button()
+
+    @staticmethod
+    def _detect_system_theme() -> str:
+        app = QApplication.instance()
+        try:
+            if app and app.styleHints().colorScheme() == Qt.ColorScheme.Dark:
+                return "dark"
+        except Exception:
+            pass
+        return "light"
 
     # ------------------------------------------------------------------ UI
 
     def _build_ui(self):
         central = QWidget()
+        central.setObjectName("rootCentral")
         self.setCentralWidget(central)
         root_layout = QVBoxLayout(central)
-        root_layout.setSpacing(8)
-        root_layout.setContentsMargins(12, 12, 12, 12)
+        root_layout.setSpacing(12)
+        root_layout.setContentsMargins(18, 16, 18, 16)
+
+        # ── 標題列 ────────────────────────────────────────────────────────
+        header_row = QHBoxLayout()
+        header_row.setSpacing(10)
+        title_lbl = QLabel("Minecraft 模組包翻譯器")
+        title_lbl.setObjectName("titleLabel")
+        version_chip = QLabel("v1.3.0")
+        version_chip.setObjectName("versionChip")
+        version_chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.theme_btn = QPushButton()
+        self.theme_btn.setObjectName("themeToggle")
+        self.theme_btn.setFixedSize(40, 32)
+        self.theme_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.theme_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.theme_btn.setToolTip("切換深色 / 淺色主題")
+        self.theme_btn.clicked.connect(self._toggle_theme)
+
+        header_row.addWidget(title_lbl)
+        header_row.addWidget(version_chip)
+        header_row.addStretch()
+        header_row.addWidget(self.theme_btn)
+        root_layout.addLayout(header_row)
 
         # ── 模組包群組 ────────────────────────────────────────────────────
         modpack_group = QGroupBox("模組包")
@@ -292,12 +280,16 @@ class MainWindow(QMainWindow):
 
         # ── 操作按鈕 ──────────────────────────────────────────────────────
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
         self.scan_btn = QPushButton("🔍  掃描模組包")
-        self.scan_btn.setFixedHeight(36)
+        self.scan_btn.setFixedHeight(40)
+        self.scan_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.scan_btn.clicked.connect(self._on_scan)
 
         self.translate_btn = QPushButton("▶  開始翻譯")
-        self.translate_btn.setFixedHeight(36)
+        self.translate_btn.setObjectName("primaryButton")
+        self.translate_btn.setFixedHeight(40)
+        self.translate_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.translate_btn.setEnabled(False)
         self.translate_btn.clicked.connect(self._on_translate_toggle)
 
@@ -309,25 +301,24 @@ class MainWindow(QMainWindow):
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         self.progress_bar.setTextVisible(True)
-        self.progress_bar.setFixedHeight(28)
-        self.progress_bar.setStyleSheet(_PROGRESS_STYLE_BLUE)
+        self.progress_bar.setFixedHeight(24)
+        self.progress_bar.setProperty("accent", "blue")
         root_layout.addWidget(self.progress_bar)
 
         # 速度/時間統計標籤
         self.stats_label = QLabel("")
+        self.stats_label.setObjectName("statsLabel")
         self.stats_label.setVisible(False)
         self.stats_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.stats_label.setStyleSheet("color: #5dade2;")
         root_layout.addWidget(self.stats_label)
 
         # ── 掃描結果面板 ──────────────────────────────────────────────────
         result_header = QHBoxLayout()
-        result_lbl = QLabel("掃描結果：")
-        bold = QFont()
-        bold.setBold(True)
-        result_lbl.setFont(bold)
+        result_lbl = QLabel("掃描結果")
+        result_lbl.setObjectName("sectionLabel")
         copy_btn = QPushButton("複製")
-        copy_btn.setFixedWidth(60)
+        copy_btn.setFixedWidth(64)
+        copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         copy_btn.clicked.connect(self._copy_log)
         result_header.addWidget(result_lbl)
         result_header.addStretch()
@@ -371,6 +362,28 @@ class MainWindow(QMainWindow):
 
     def _copy_log(self):
         QApplication.clipboard().setText(self.log_edit.toPlainText())
+
+    # ------------------------------------------------------------------ 主題 / 樣式
+
+    def _toggle_theme(self):
+        self._theme_mode = "dark" if self._theme_mode == "light" else "light"
+        apply_theme(self._theme_mode)
+        self._settings.setValue("ui/theme", self._theme_mode)
+        self._update_theme_button()
+
+    def _update_theme_button(self):
+        # 顯示「點下去會切換成」的圖示
+        self.theme_btn.setText("☀" if self._theme_mode == "dark" else "🌙")
+
+    def _set_tone(self, widget, tone: str):
+        """設定按鈕語意狀態（""/danger/warning/success），由全域 QSS 上色。"""
+        widget.setProperty("tone", tone)
+        restyle(widget)
+
+    def _set_accent(self, accent: str):
+        """設定進度條顏色（blue/green/orange），由全域 QSS 上色。"""
+        self.progress_bar.setProperty("accent", accent)
+        restyle(self.progress_bar)
 
     # ------------------------------------------------------------------ 輔助
 
@@ -467,7 +480,7 @@ class MainWindow(QMainWindow):
         self.translate_btn.setEnabled(False)
         self.progress_bar.setRange(0, 0)
         self.progress_bar.setFormat("")
-        self.progress_bar.setStyleSheet(_PROGRESS_STYLE_BLUE)
+        self._set_accent("blue")
         self.progress_bar.setVisible(True)
         self.stats_label.setVisible(False)
         self.log_edit.setPlainText("")
@@ -566,7 +579,7 @@ class MainWindow(QMainWindow):
         modpack_path = Path(self.modpack_edit.text().strip()).resolve()
 
         self.translate_btn.setText("⏹  停止")
-        self.translate_btn.setStyleSheet("background-color: #c0392b; color: white;")
+        self._set_tone(self.translate_btn, "danger")
         self.scan_btn.setEnabled(False)
 
         n_files = len(self._scan_targets)
@@ -576,7 +589,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setRange(0, n_pairs)
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("%p%")
-        self.progress_bar.setStyleSheet(_PROGRESS_STYLE_BLUE)
+        self._set_accent("blue")
         self.progress_bar.setVisible(True)
 
         self._translation_start_time = time.monotonic()
@@ -625,9 +638,9 @@ class MainWindow(QMainWindow):
         summary_lines = ["", "─" * 40]
 
         if self._translation_cancelled:
-            self.progress_bar.setStyleSheet(_PROGRESS_STYLE_ORANGE)
+            self._set_accent("orange")
             self.translate_btn.setText("↩  已停止，繼續？")
-            self.translate_btn.setStyleSheet("background-color: #e67e22; color: white;")
+            self._set_tone(self.translate_btn, "warning")
             summary_lines += [
                 "翻譯已中止",
                 f"  已翻譯：{translated:,} 組",
@@ -636,9 +649,9 @@ class MainWindow(QMainWindow):
             ]
         else:
             self.progress_bar.setValue(self.progress_bar.maximum())
-            self.progress_bar.setStyleSheet(_PROGRESS_STYLE_GREEN)
+            self._set_accent("green")
             self.translate_btn.setText("✓  完成")
-            self.translate_btn.setStyleSheet("background-color: #27ae60; color: white;")
+            self._set_tone(self.translate_btn, "success")
             self._translated_modpack_path = self.modpack_edit.text().strip()
             summary_lines += [
                 "翻譯完成",
@@ -660,7 +673,7 @@ class MainWindow(QMainWindow):
         self._stats_timer.stop()
         self._force_stop_timer.stop()
         self.translate_btn.setText("▶  開始翻譯")
-        self.translate_btn.setStyleSheet("")
+        self._set_tone(self.translate_btn, "")
         self.progress_bar.setVisible(False)
         self.stats_label.setVisible(False)
         self._set_busy(False)
@@ -702,7 +715,7 @@ class MainWindow(QMainWindow):
             "如有任務設定損壞，請從 quests_bak/ 還原。",
         )
         self.translate_btn.setText("↩  已停止，繼續？")
-        self.translate_btn.setStyleSheet("background-color: #e67e22; color: white;")
+        self._set_tone(self.translate_btn, "warning")
         self.translate_btn.setEnabled(True)
         self.scan_btn.setEnabled(True)
         self.stats_label.setVisible(False)
@@ -713,8 +726,8 @@ class MainWindow(QMainWindow):
         current_text = self.translate_btn.text()
         if current_text in ("✓  完成", "↩  已停止，繼續？"):
             self.translate_btn.setText("▶  開始翻譯")
-            self.translate_btn.setStyleSheet("")
-            self.progress_bar.setStyleSheet(_PROGRESS_STYLE_BLUE)
+            self._set_tone(self.translate_btn, "")
+            self._set_accent("blue")
 
     def closeEvent(self, event):
         if self._translate_worker and self._translate_worker.isRunning():
