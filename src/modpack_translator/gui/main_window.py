@@ -4,7 +4,7 @@ import time
 from collections import deque
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QSettings, QTimer
+from PySide6.QtCore import Qt, QSettings, QThread, QTimer, Signal
 from PySide6.QtGui import QFont, QIcon, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
@@ -32,6 +32,8 @@ _APP_ICON_PATH = _PROJECT_ROOT / "assets" / "icon" / "app_icon.png"
 from modpack_translator.config import load_config
 from modpack_translator.gui.theme import apply_theme, restyle
 from modpack_translator.gui.worker import ScanWorker, TranslateWorker
+from modpack_translator.version import APP_NAME, APP_VERSION, __version__
+from scripts.updater import UpdateInfo, check_for_update, download_update, launch_apply_update
 
 
 def _make_help_label(tooltip_text: str) -> QPushButton:
@@ -60,7 +62,7 @@ _FMT_NAME_MAP: dict[str, str] = {
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Minecraft模組包翻譯器v1.3.1")
+        self.setWindowTitle(f"{APP_NAME}{APP_VERSION}")
         if _APP_ICON_PATH.exists():
             self.setWindowIcon(QIcon(str(_APP_ICON_PATH)))
         self.setMinimumWidth(760)
@@ -73,6 +75,8 @@ class MainWindow(QMainWindow):
         self._scan_total_pairs: int = 0
         self._translate_worker: TranslateWorker | None = None
         self._scan_worker: ScanWorker | None = None
+        self._update_check_worker: UpdateCheckWorker | None = None
+        self._update_download_worker: UpdateDownloadWorker | None = None
 
         self._translated_modpack_path: str = ""
         self._translation_start_time: float = 0.0
@@ -112,6 +116,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         apply_theme(self._theme_mode)
         self._update_theme_button()
+        QTimer.singleShot(1200, self._check_for_updates)
 
     @staticmethod
     def _detect_system_theme() -> str:
@@ -138,7 +143,7 @@ class MainWindow(QMainWindow):
         header_row.setSpacing(10)
         title_lbl = QLabel("Minecraft 模組包翻譯器")
         title_lbl.setObjectName("titleLabel")
-        version_chip = QLabel("v1.3.1")
+        version_chip = QLabel(APP_VERSION)
         version_chip.setObjectName("versionChip")
         version_chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
@@ -374,6 +379,59 @@ class MainWindow(QMainWindow):
     def _update_theme_button(self):
         # 顯示「點下去會切換成」的圖示
         self.theme_btn.setText("☀" if self._theme_mode == "dark" else "🌙")
+
+    # ------------------------------------------------------------------ 更新
+
+    def _check_for_updates(self):
+        if self._update_check_worker and self._update_check_worker.isRunning():
+            return
+        self._update_check_worker = UpdateCheckWorker(__version__)
+        self._update_check_worker.update_available.connect(self._show_update_dialog)
+        self._update_check_worker.start()
+
+    def _show_update_dialog(self, info: UpdateInfo):
+        size_mb = info.asset_size / (1024 * 1024) if info.asset_size else 0
+        notes = info.notes.strip()
+        if len(notes) > 1200:
+            notes = notes[:1200].rstrip() + "\n..."
+        message = (
+            f"目前版本：{APP_VERSION}\n"
+            f"最新版本：{info.tag_name}\n"
+            f"下載大小：{size_mb:.1f} MB\n\n"
+            f"{notes or '此版本沒有 release notes。'}\n\n"
+            "是否下載並自動套用更新？程式會關閉，移除舊的虛擬環境與後端設定，"
+            "重新執行 setup，完成後再啟動新版。"
+        )
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle("發現新版本")
+        box.setText(message)
+        update_btn = box.addButton("自動更新", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("稍後", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is update_btn:
+            self._download_and_apply_update(info)
+
+    def _download_and_apply_update(self, info: UpdateInfo):
+        if self._translate_worker and self._translate_worker.isRunning():
+            QMessageBox.warning(self, "無法更新", "翻譯進行中不能更新。請先停止翻譯。")
+            return
+        if self._update_download_worker and self._update_download_worker.isRunning():
+            return
+        self._update_download_worker = UpdateDownloadWorker(info)
+        self._update_download_worker.finished_path.connect(self._apply_downloaded_update)
+        self._update_download_worker.error.connect(
+            lambda msg: QMessageBox.critical(self, "更新失敗", msg)
+        )
+        self._update_download_worker.start()
+
+    def _apply_downloaded_update(self, zip_path: str):
+        try:
+            launch_apply_update(Path(zip_path), restart=True)
+        except Exception as exc:
+            QMessageBox.critical(self, "更新失敗", str(exc))
+            return
+        QApplication.quit()
 
     def _set_tone(self, widget, tone: str):
         """設定按鈕語意狀態（""/danger/warning/success），由全域 QSS 上色。"""
@@ -737,3 +795,32 @@ class MainWindow(QMainWindow):
                 self._translate_worker.terminate()
                 self._translate_worker.wait(2_000)
         event.accept()
+
+
+class UpdateCheckWorker(QThread):
+    update_available = Signal(object)
+
+    def __init__(self, current_version: str):
+        super().__init__()
+        self._current_version = current_version
+
+    def run(self):
+        info = check_for_update(self._current_version)
+        if info is not None:
+            self.update_available.emit(info)
+
+
+class UpdateDownloadWorker(QThread):
+    finished_path = Signal(str)
+    error = Signal(str)
+
+    def __init__(self, info: UpdateInfo):
+        super().__init__()
+        self._info = info
+
+    def run(self):
+        try:
+            path = download_update(self._info)
+            self.finished_path.emit(str(path))
+        except Exception as exc:
+            self.error.emit(str(exc))

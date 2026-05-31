@@ -5,6 +5,8 @@ build/
 dist/
 wheels/
 *.egg-info/
+模組包翻譯器v*.exe
+assets/icon/app_icon.ico
 
 # ── Virtual environments ──────────────────────────────────────────────────────
 .venv/

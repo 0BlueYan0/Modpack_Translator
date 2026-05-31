@@ -20,9 +20,12 @@ call :msg
 uv run python scripts\setup_backend.py %*
 if errorlevel 1 exit /b 1
 
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_windows_launcher.ps1 >nul 2>nul
+
 set "MSG_B64=5Yid5aeL5YyW5a6M5oiQ44CC6KuL5L2/55So5Lul5LiL5oyH5Luk5ZWf5YuV56iL5byP77ya"
 call :msg
 echo uv run python main.py
+echo Or double-click the versioned launcher EXE in this folder.
 exit /b 0
 
 :msg

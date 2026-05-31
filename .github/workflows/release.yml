@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v1.4.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Resolve tag
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ inputs.tag }}"
+          }
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$') {
+            throw "Tag must look like v1.4.0. Got: $tag"
+          }
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "version=$($tag.TrimStart('v'))" >> $env:GITHUB_OUTPUT
+
+      - name: Validate project version
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $pyproject = Get-Content pyproject.toml -Raw
+          if ($pyproject -notmatch "version\s*=\s*`"$version`"") {
+            throw "pyproject.toml version does not match $version"
+          }
+
+      - name: Build Windows launcher
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_windows_launcher.ps1
+
+      - name: Build release archive
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.version.outputs.tag }}"
+          $dist = "dist"
+          $stage = Join-Path $dist "Modpack_Translator-$tag"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          $excludeDirs = @(
+            ".git", ".github", ".venv", ".runtime", "__pycache__",
+            "outputs", "Failed Items", "mods_bak", "quests_bak",
+            "data", "logs", "dist", "build", "wheels"
+          )
+          $excludeFiles = @("*.pyc", "*.pyo", "*.log", ".env", ".env.*")
+
+          Get-ChildItem -Force | ForEach-Object {
+            if ($excludeDirs -contains $_.Name) { return }
+            if ($_.PSIsContainer) {
+              Copy-Item $_.FullName (Join-Path $stage $_.Name) -Recurse -Force
+            } else {
+              foreach ($pattern in $excludeFiles) {
+                if ($_.Name -like $pattern) { return }
+              }
+              Copy-Item $_.FullName (Join-Path $stage $_.Name) -Force
+            }
+          }
+
+          $zip = Join-Path $dist "Modpack_Translator-$tag.zip"
+          Compress-Archive -Path $stage -DestinationPath $zip -Force
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  Modpack_Translator-$tag.zip" | Set-Content "$zip.sha256" -NoNewline -Encoding ascii
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
+          generate_release_notes: true
+          files: |
+            dist/Modpack_Translator-${{ steps.version.outputs.tag }}.zip
+            dist/Modpack_Translator-${{ steps.version.outputs.tag }}.zip.sha256
