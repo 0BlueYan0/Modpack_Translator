@@ -200,12 +200,50 @@ def select_backend(requested: str) -> str:
     return "cpu"
 
 
+def library_search_dirs() -> list[Path]:
+    """系統載入器可能放置 CUDA/NVIDIA DLL 的目錄。
+
+    Python 3.8 起 ctypes 用裸檔名載入 DLL 時改用
+    LOAD_LIBRARY_SEARCH_DEFAULT_DIRS，不再搜尋 PATH。CUDA Toolkit 把
+    cudart/cuBLAS 安裝在加進 PATH 的 bin 目錄，因此必須明確列出這些目錄，
+    否則就算 CUDA 正確安裝也會誤判為缺少函式庫。
+    """
+    dirs: list[Path] = []
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        entry = entry.strip().strip('"')
+        if entry:
+            dirs.append(Path(entry))
+    for key, value in os.environ.items():
+        if key.upper().startswith("CUDA_PATH") and value:
+            dirs.append(Path(value) / "bin")
+    if platform.system().lower() == "windows":
+        toolkit = Path(
+            os.environ.get("ProgramFiles", r"C:\Program Files")
+        ) / "NVIDIA GPU Computing Toolkit" / "CUDA"
+        if toolkit.is_dir():
+            for child in toolkit.iterdir():
+                dirs.append(child / "bin")
+    return dirs
+
+
+def find_library_path(name: str) -> Path | None:
+    for directory in library_search_dirs():
+        candidate = directory / name
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def can_load_library(name: str) -> bool:
     import ctypes
 
     loader = ctypes.WinDLL if platform.system().lower() == "windows" else ctypes.CDLL
+    # 先用完整路徑載入：找得到檔案就用它（完整路徑會以該 DLL 所在目錄解析其
+    # 相依函式庫）；找不到才退回裸檔名，沿用系統預設搜尋（System32、ld.so）。
+    full_path = find_library_path(name)
+    target = str(full_path) if full_path else name
     try:
-        loader(name)
+        loader(target)
         return True
     except OSError:
         return False
