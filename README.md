@@ -1,4 +1,4 @@
-# Minecraft Modpack Translator v1.3.0
+# Minecraft Modpack Translator v1.3.1
 
 **Language / 語言：** English | [繁體中文](README_zh.md)
 
@@ -164,7 +164,7 @@ model:
   server_api_key: "llama.cpp"
   server_model: "local-model"
   auto_start_server: true
-  server_ready_timeout: 180
+  server_ready_timeout: 600
 ```
 
 ### `configs/paths.yaml`
@@ -294,6 +294,7 @@ uv run python scripts/translate_modpack.py --modpack "C:/CurseForge/Instances/AT
 - Re-run `setup_windows.bat` or `./setup_unix.sh`.
 - Close the app before re-running setup. A running server can lock backend files on Windows.
 - For NVIDIA CUDA backend, install CUDA Toolkit 12.4 or newer. cuDNN is not required.
+- If the log only shows tensor loading or a `VirtualLock`/`mlock` warning, the model is usually still loading or an old backend command enabled memory locking. Re-run setup; generated Python backends disable memory locking by default.
 - Check `.runtime/llama-server.log` for the real server error.
 
 **Q: Model files are missing.**

@@ -1,4 +1,4 @@
-# Minecraft模組包翻譯器 v1.3.0
+# Minecraft模組包翻譯器 v1.3.1
 
 **Language / 語言：** [English](README.md) | 繁體中文
 
@@ -166,7 +166,7 @@ model:
   server_api_key: "llama.cpp"
   server_model: "local-model"
   auto_start_server: true
-  server_ready_timeout: 180
+  server_ready_timeout: 600
 ```
 
 ### `configs/paths.yaml`
@@ -296,6 +296,7 @@ uv run python scripts/translate_modpack.py --modpack "C:/CurseForge/Instances/AT
 - 重新執行 `setup_windows.bat` 或 `./setup_unix.sh`。
 - 重新初始化前請先關閉翻譯器。Windows 上正在執行的 server 可能鎖住後端檔案。
 - NVIDIA CUDA 後端需要 CUDA Toolkit 12.4 或更新版本。cuDNN 不需要。
+- 如果 log 只顯示 tensor loading 或 `VirtualLock`/`mlock` warning，通常是模型仍在載入，或舊的後端命令啟用了 memory locking。請重新執行 setup；新產生的 Python 後端預設會關閉 memory locking。
 - 查看 `.runtime/llama-server.log`，裡面會有真正的 server 錯誤。
 
 **Q：模型檔案遺失。**

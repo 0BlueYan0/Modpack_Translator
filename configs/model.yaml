@@ -23,4 +23,4 @@ model:
   server_api_key: "llama.cpp"
   server_model: "local-model"
   auto_start_server: true
-  server_ready_timeout: 180
+  server_ready_timeout: 600

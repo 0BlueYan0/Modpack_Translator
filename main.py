@@ -21,7 +21,7 @@ def _set_windows_app_id() -> None:
         import ctypes
 
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-            "koudesuk.modpacktranslator.1.2.0"
+            "koudesuk.modpacktranslator.1.3.1"
         )
     except Exception:
         pass
@@ -33,7 +33,7 @@ def main():
     # Fusion 是跨平台一致、且最配合 QSS / colorScheme 的基礎樣式
     app.setStyle("Fusion")
     app.setApplicationName("Minecraft模組包翻譯器")
-    app.setApplicationDisplayName("Minecraft模組包翻譯器v1.3.0")
+    app.setApplicationDisplayName("Minecraft模組包翻譯器v1.3.1")
     if _APP_ICON_PATH.exists():
         app.setWindowIcon(QIcon(str(_APP_ICON_PATH)))
     win = MainWindow()

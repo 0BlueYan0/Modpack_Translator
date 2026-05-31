@@ -44,7 +44,7 @@ class ModelConfig(BaseModel):
     server_api_key: str = "llama.cpp"
     server_model: str = "local-model"
     auto_start_server: bool = True
-    server_ready_timeout: int = 180
+    server_ready_timeout: int = 600
     server_start_command: str | list[str] | None = None
 
 

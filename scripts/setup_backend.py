@@ -452,6 +452,8 @@ def python_server_command(cfg: dict, base_model: Path, lora: Path, gpu_layers: i
         str(gpu_layers),
         "--n_ctx",
         str(cfg["n_ctx"]),
+        "--use_mlock",
+        "false",
         "--host",
         host,
         "--port",

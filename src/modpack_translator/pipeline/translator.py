@@ -8,7 +8,7 @@ import subprocess
 import time
 from pathlib import Path
 from typing import Callable
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from modpack_translator.config import ModelConfig
@@ -16,6 +16,8 @@ from modpack_translator.config import ModelConfig
 _PROJECT_ROOT = Path(__file__).parents[3]
 _RUNTIME_BACKEND = _PROJECT_ROOT / ".runtime" / "backend.json"
 _SERVER_LOG = _PROJECT_ROOT / ".runtime" / "llama-server.log"
+_READY_POLL_SECONDS = 1.0
+_READY_REQUEST_TIMEOUT = 2.0
 
 
 class _WindowsJob:
@@ -162,26 +164,69 @@ def _as_command(value: str | list[str] | None) -> list[str]:
     # Older setup output passed --lora_scale to llama_cpp.server. The Python
     # server does not accept that flag in current releases, so sanitize stale
     # .runtime/backend.json files instead of making users rerun setup.
+    #
+    # Also normalize memory locking off. llama-cpp-python enables use_mlock by
+    # default on platforms that support it, which makes some Windows machines
+    # fail VirtualLock during model load. This app favors reliable startup over
+    # pinning the whole model in RAM.
     cleaned: list[str] = []
-    skip_next = False
-    for part in command:
-        if skip_next:
-            skip_next = False
-            continue
+    index = 0
+    while index < len(command):
+        part = command[index]
         if part == "--lora_scale":
-            skip_next = True
+            if index + 1 < len(command) and not command[index + 1].startswith("-"):
+                index += 1
+            index += 1
+            continue
+        if part == "--mlock":
+            index += 1
+            continue
+        if part == "--use_mlock":
+            cleaned.extend(["--use_mlock", "false"])
+            if index + 1 < len(command) and not command[index + 1].startswith("-"):
+                index += 1
+            index += 1
+            continue
+        if part.startswith("--use_mlock="):
+            cleaned.append("--use_mlock=false")
+            index += 1
             continue
         cleaned.append(part)
+        index += 1
     return cleaned
 
 
-def _server_ready(base_url: str, timeout: float = 3.0) -> bool:
+def _server_status(base_url: str, timeout: float = _READY_REQUEST_TIMEOUT) -> str:
+    for path in ("/health", "/v1/health"):
+        request = Request(f"{base_url}{path}")
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                if response.status == 200:
+                    return "ready"
+                if response.status == 503:
+                    return "loading"
+        except HTTPError as exc:
+            if exc.code == 503:
+                return "loading"
+        except (OSError, URLError):
+            pass
+
     request = Request(f"{base_url}/v1/models")
     try:
         with urlopen(request, timeout=timeout) as response:
-            return 200 <= response.status < 500
+            return "ready" if 200 <= response.status < 500 else "unreachable"
+    except HTTPError as exc:
+        if exc.code == 503:
+            return "loading"
+        if exc.code in (401, 403):
+            return "ready"
+        return "unreachable"
     except (OSError, URLError):
-        return False
+        return "unreachable"
+
+
+def _server_ready(base_url: str, timeout: float = 3.0) -> bool:
+    return _server_status(base_url, timeout=timeout) == "ready"
 
 
 def _server_log_tail(max_chars: int = 4000) -> str:
@@ -195,6 +240,13 @@ def _server_log_tail(max_chars: int = 4000) -> str:
 
 def _backend_help_from_log(detail: str) -> str:
     lowered = detail.lower()
+    if "failed to virtuallock" in lowered or "failed to mlock" in lowered:
+        return (
+            "\n\nLikely cause: the backend tried to lock the model into RAM. "
+            "That is fragile on Windows and on low-memory machines. "
+            "Re-run setup so .runtime/backend.json is regenerated with memory "
+            "locking disabled."
+        )
     if "llama.dll" in lowered or "could not find module" in lowered:
         return (
             "\n\nLikely cause: the installed llama-cpp-python backend is broken "
@@ -259,17 +311,25 @@ class GGUFTranslator:
                             self._server_job.close()
                             self._server_job = None
 
-                deadline = time.monotonic() + cfg.server_ready_timeout
+                deadline = time.monotonic() + max(1, cfg.server_ready_timeout)
                 while time.monotonic() < deadline:
                     if _server_ready(self._base_url):
                         break
                     if self._server_process.poll() is not None:
                         break
-                    time.sleep(1)
+                    time.sleep(_READY_POLL_SECONDS)
 
-        if not _server_ready(self._base_url):
+        status = _server_status(self._base_url)
+        if status != "ready":
             detail = _server_log_tail()
             suffix = f"\n\nLast llama-server log:\n{detail}{_backend_help_from_log(detail)}" if detail else ""
+            if status == "loading":
+                suffix = (
+                    f"\n\nThe server is still loading after {cfg.server_ready_timeout} seconds. "
+                    "On slow disks, CPU-only systems, or low-memory Windows machines, "
+                    "increase model.server_ready_timeout in configs/model.yaml."
+                    f"{suffix}"
+                )
             raise RuntimeError(
                 "Local model server is not reachable. Run setup_windows.bat or "
                 "setup_unix.sh first, or start llama-server manually and set "
