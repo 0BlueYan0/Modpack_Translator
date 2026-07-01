@@ -143,7 +143,23 @@ setup_windows.bat --backend cpu
 ./setup_unix.sh --backend cpu
 ```
 
-The application talks to the model through an OpenAI-compatible local HTTP API. You can also start your own compatible server and set `LLAMA_SERVER_URL`, for example `http://127.0.0.1:8080/v1`.
+The application talks to the model through an OpenAI-compatible local HTTP API. You can also start your own compatible server and set `LLAMA_SERVER_URL`, for example `http://127.0.0.1:8888/v1`.
+
+### Using a remote OpenAI-compatible API (optional)
+
+Besides the local model, you can point the translator at any remote OpenAI-compatible
+endpoint (OpenAI, OpenRouter, Groq, self-hosted vLLM, etc.).
+
+**GUI:** In "Model settings → Backend mode", choose "Remote API", then fill in the Base URL
+(e.g. `https://api.openai.com/v1`), API Key, and model name (e.g. `gpt-4o-mini`). Use
+"Test connection" to verify. Settings are saved locally.
+
+**CLI / advanced:** Set `backend_mode: "remote"` plus `remote_base_url` / `remote_api_key` /
+`remote_model` in `configs/model.yaml`, or override with the environment variables
+`MODPACK_TRANSLATOR_REMOTE_URL` / `MODPACK_TRANSLATOR_REMOTE_API_KEY` / `MODPACK_TRANSLATOR_REMOTE_MODEL`.
+
+Note: remote mode is billed per provider (modpacks contain many strings), but the translation
+cache means re-runs only pay for new strings.
 
 If you change the base model, LoRA adapter, context size, GPU layer count, or backend type in `configs/model.yaml`, run the setup script again so `.runtime/backend.json` is regenerated.
 
@@ -166,7 +182,7 @@ model:
   temperature: 0.05
   repeat_penalty: 1.1
   verbose: false
-  server_url: "http://127.0.0.1:8080/v1"
+  server_url: "http://127.0.0.1:8888/v1"
   server_api_key: "llama.cpp"
   server_model: "local-model"
   auto_start_server: true

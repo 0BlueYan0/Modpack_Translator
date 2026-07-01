@@ -145,7 +145,20 @@ setup_windows.bat --backend cpu
 ./setup_unix.sh --backend cpu
 ```
 
-程式會透過 OpenAI-compatible 本機 HTTP API 呼叫模型。若您自行啟動相容 server，也可以設定 `LLAMA_SERVER_URL`，例如 `http://127.0.0.1:8080/v1`。
+程式會透過 OpenAI-compatible 本機 HTTP API 呼叫模型。若您自行啟動相容 server，也可以設定 `LLAMA_SERVER_URL`，例如 `http://127.0.0.1:8888/v1`。
+
+### 使用遠端 OpenAI 相容 API（可選）
+
+除了本機模型，也可改用遠端 OpenAI 相容端點（OpenAI、OpenRouter、Groq、自架 vLLM 等）。
+
+**GUI：** 在「模型設定 → 後端模式」選「遠端 API」，填入 Base URL（例如 `https://api.openai.com/v1`）、
+API Key 與模型名稱（例如 `gpt-4o-mini`），可按「測試連線」確認設定正確。設定會保存在本機。
+
+**CLI／進階：** 於 `configs/model.yaml` 設定 `backend_mode: "remote"` 與 `remote_base_url` /
+`remote_api_key` / `remote_model`；或用環境變數 `MODPACK_TRANSLATOR_REMOTE_URL` /
+`MODPACK_TRANSLATOR_REMOTE_API_KEY` / `MODPACK_TRANSLATOR_REMOTE_MODEL` 覆寫。
+
+注意：遠端模式按供應商計費（模組包字串眾多），但有翻譯快取，重跑僅計費新字串。
 
 若修改了 `configs/model.yaml` 中的基礎模型、LoRA、context size、GPU 層數或後端類型，請重新執行初始化腳本，讓 `.runtime/backend.json` 重新產生。
 
@@ -168,7 +181,7 @@ model:
   temperature: 0.05
   repeat_penalty: 1.1
   verbose: false
-  server_url: "http://127.0.0.1:8080/v1"
+  server_url: "http://127.0.0.1:8888/v1"
   server_api_key: "llama.cpp"
   server_model: "local-model"
   auto_start_server: true
