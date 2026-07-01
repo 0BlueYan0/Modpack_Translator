@@ -19,8 +19,18 @@ model:
   # Local OpenAI-compatible server backend.
   # setup_windows.bat / setup_unix.sh writes .runtime/backend.json with the
   # concrete server command for this machine.
-  server_url: "http://127.0.0.1:8080/v1"
+  server_url: "http://127.0.0.1:8888/v1"
   server_api_key: "llama.cpp"
   server_model: "local-model"
   auto_start_server: true
   server_ready_timeout: 600
+
+  # ── 遠端 OpenAI 相容 API（可選）───────────────────────────────
+  # backend_mode: "local" 使用上面的本地 llama.cpp server；
+  #               "remote" 改用下列遠端 OpenAI 相容端點（OpenAI / OpenRouter / Groq / 自架 vLLM…）。
+  # GUI 會以「模型設定 → 後端模式」的選擇覆寫這裡；CLI 則直接讀這裡。
+  # 也可用環境變數覆寫：MODPACK_TRANSLATOR_REMOTE_URL / _API_KEY / _MODEL
+  backend_mode: "local"
+  remote_base_url: ""      # 例如 https://api.openai.com/v1
+  remote_api_key: ""       # 例如 sk-...
+  remote_model: ""         # 例如 gpt-4o-mini

@@ -40,12 +40,18 @@ class ModelConfig(BaseModel):
     temperature: float = 0.05
     repeat_penalty: float = 1.1
     verbose: bool = False
-    server_url: str = "http://127.0.0.1:8080/v1"
+    server_url: str = "http://127.0.0.1:8888/v1"
     server_api_key: str = "llama.cpp"
     server_model: str = "local-model"
     auto_start_server: bool = True
     server_ready_timeout: int = 600
     server_start_command: str | list[str] | None = None
+
+    # ── 遠端 OpenAI 相容 API（可選）──────────────────────────
+    backend_mode: str = "local"          # "local" | "remote"
+    remote_base_url: str = ""            # 例如 https://api.openai.com/v1
+    remote_api_key: str = ""             # 例如 sk-...
+    remote_model: str = ""               # 例如 gpt-4o-mini
 
 
 class PathsConfig(BaseModel):
