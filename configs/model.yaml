@@ -29,7 +29,8 @@ model:
   # backend_mode: "local" 使用上面的本地 llama.cpp server；
   #               "remote" 改用下列遠端 OpenAI 相容端點（OpenAI / OpenRouter / Groq / 自架 vLLM…）。
   # GUI 會以「模型設定 → 後端模式」的選擇覆寫這裡；CLI 則直接讀這裡。
-  # 也可用環境變數覆寫：MODPACK_TRANSLATOR_REMOTE_URL / _API_KEY / _MODEL
+  # 下列欄位留空時，會以環境變數 MODPACK_TRANSLATOR_REMOTE_URL / _API_KEY / _MODEL 作為備援填補；
+  # 這裡已填寫的值一律優先，環境變數不會覆蓋。
   backend_mode: "local"
   remote_base_url: ""      # 例如 https://api.openai.com/v1
   remote_api_key: ""       # 例如 sk-...

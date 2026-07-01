@@ -155,8 +155,8 @@ setup_windows.bat --backend cpu
 API Key 與模型名稱（例如 `gpt-4o-mini`），可按「測試連線」確認設定正確。設定會保存在本機。
 
 **CLI／進階：** 於 `configs/model.yaml` 設定 `backend_mode: "remote"` 與 `remote_base_url` /
-`remote_api_key` / `remote_model`；或用環境變數 `MODPACK_TRANSLATOR_REMOTE_URL` /
-`MODPACK_TRANSLATOR_REMOTE_API_KEY` / `MODPACK_TRANSLATOR_REMOTE_MODEL` 覆寫。
+`remote_api_key` / `remote_model`；任一欄位留空時，會以環境變數 `MODPACK_TRANSLATOR_REMOTE_URL` /
+`MODPACK_TRANSLATOR_REMOTE_API_KEY` / `MODPACK_TRANSLATOR_REMOTE_MODEL` 作為備援填補（設定檔中已填寫的值優先）。
 
 注意：遠端模式按供應商計費（模組包字串眾多），但有翻譯快取，重跑僅計費新字串。
 

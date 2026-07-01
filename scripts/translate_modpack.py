@@ -170,7 +170,11 @@ def main():
         print("\n正在連線遠端 API…")
     else:
         print("\n正在連線或啟動本機模型服務…")
-    translator = build_translator(cfg.model, cfg.language.system_prompt)
+    try:
+        translator = build_translator(cfg.model, cfg.language.system_prompt)
+    except TranslatorFatalError as exc:
+        print(f"模型服務啟動失敗：{exc}")
+        raise SystemExit(1)
 
     try:
         cache = _load_cache(cache_path)

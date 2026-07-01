@@ -57,14 +57,26 @@ def test_remote_translate_omits_repeat_penalty(monkeypatch):
     assert cap["model"] == "gpt-4o-mini"
 
 
-def test_remote_translate_env_override(monkeypatch):
-    cap = {}
-    monkeypatch.setattr(rt, "OpenAI", lambda **kw: FakeClient(["x"], cap))
+def test_remote_cfg_beats_env_and_env_fills_blank(monkeypatch):
+    # cfg.remote_model 非空時，即使環境變數也有設定，cfg 值仍應勝出。
+    cap_cfg = {}
+    monkeypatch.setattr(rt, "OpenAI", lambda **kw: FakeClient(["x"], cap_cfg))
     monkeypatch.setenv("MODPACK_TRANSLATOR_REMOTE_MODEL", "env-model")
     cfg = ModelConfig(backend_mode="remote", remote_base_url="http://x/v1", remote_model="cfg-model")
     tr = rt.RemoteTranslator(cfg, "sys")
     tr.translate("hi")
-    assert cap["model"] == "env-model"
+    assert cap_cfg["model"] == "cfg-model"
+    monkeypatch.delenv("MODPACK_TRANSLATOR_REMOTE_MODEL", raising=False)
+
+    # cfg.remote_model 為空字串時，環境變數作為備援被採用。
+    cap_env = {}
+    monkeypatch.setattr(rt, "OpenAI", lambda **kw: FakeClient(["y"], cap_env))
+    monkeypatch.setenv("MODPACK_TRANSLATOR_REMOTE_MODEL", "env-model")
+    cfg_blank = ModelConfig(backend_mode="remote", remote_base_url="http://x/v1", remote_model="")
+    tr2 = rt.RemoteTranslator(cfg_blank, "sys")
+    tr2.translate("hi")
+    assert cap_env["model"] == "env-model"
+    monkeypatch.delenv("MODPACK_TRANSLATOR_REMOTE_MODEL", raising=False)
 
 
 def test_remote_init_requires_url_and_model(monkeypatch):

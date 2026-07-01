@@ -7,12 +7,15 @@ import signal
 import subprocess
 import time
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from modpack_translator.config import ModelConfig
 from modpack_translator.pipeline._chat import normalize_base_url, stream_chat
+
+if TYPE_CHECKING:
+    from modpack_translator.pipeline.remote_translator import RemoteTranslator
 
 _PROJECT_ROOT = Path(__file__).parents[3]
 _RUNTIME_BACKEND = _PROJECT_ROOT / ".runtime" / "backend.json"
@@ -412,7 +415,7 @@ class GGUFTranslator:
         )
 
 
-def build_translator(cfg: ModelConfig, system_prompt: str):
+def build_translator(cfg: ModelConfig, system_prompt: str) -> "GGUFTranslator | RemoteTranslator":
     """依 backend_mode 回傳對應的 translator。介面一致：translate() / close() / context manager。"""
     if cfg.backend_mode == "remote":
         from modpack_translator.pipeline.remote_translator import RemoteTranslator

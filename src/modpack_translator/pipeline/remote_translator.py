@@ -18,9 +18,11 @@ class RemoteTranslator:
     """對遠端 OpenAI 相容 API 做串流翻譯。無本地 server 生命週期，close() 為 no-op。"""
 
     def __init__(self, cfg: ModelConfig, system_prompt: str) -> None:
-        base_url = os.getenv("MODPACK_TRANSLATOR_REMOTE_URL") or cfg.remote_base_url
-        api_key = os.getenv("MODPACK_TRANSLATOR_REMOTE_API_KEY") or cfg.remote_api_key
-        model = os.getenv("MODPACK_TRANSLATOR_REMOTE_MODEL") or cfg.remote_model
+        # 明確設定（GUI QSettings 經 _build_cfg 注入，或 model.yaml）優先；
+        # 環境變數僅在對應欄位留空時作為備援填補。
+        base_url = cfg.remote_base_url or os.getenv("MODPACK_TRANSLATOR_REMOTE_URL", "")
+        api_key = cfg.remote_api_key or os.getenv("MODPACK_TRANSLATOR_REMOTE_API_KEY", "")
+        model = cfg.remote_model or os.getenv("MODPACK_TRANSLATOR_REMOTE_MODEL", "")
 
         if not base_url:
             raise TranslatorFatalError("未設定遠端 API Base URL。")
@@ -48,7 +50,7 @@ class RemoteTranslator:
         )
 
     def close(self) -> None:
-        return None
+        pass
 
     def __enter__(self) -> "RemoteTranslator":
         return self

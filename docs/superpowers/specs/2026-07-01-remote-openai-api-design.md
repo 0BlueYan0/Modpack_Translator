@@ -63,7 +63,7 @@ remote_model: str = ""
 
 刻意使用**全新 `remote_*` 欄位**，不重用既有 `server_url/server_api_key/server_model`（那組會被 `.runtime/backend.json` 蓋掉，即第 1 節的優先序陷阱）。
 
-**遠端欄位讀取優先序**：QSettings（GUI 存的，經由 `_build_cfg` 注入 `cfg.model`）> 環境變數 `MODPACK_TRANSLATOR_REMOTE_URL` / `_API_KEY` / `_MODEL` > `model.yaml` 預設。CLI 使用者可用 yaml / 環境變數。
+**遠端欄位讀取優先序**：明確設定來源（GUI QSettings，經由 `_build_cfg` 注入 `cfg.model`；或 `configs/model.yaml`）優先採用。環境變數 `MODPACK_TRANSLATOR_REMOTE_URL` / `_API_KEY` / `_MODEL` 僅在對應欄位留空時作為備援填補，不會覆蓋已設定的值。CLI 使用者可直接於 yaml 設定，或留空由環境變數補上。
 
 ### 3.3 關鍵行為差異
 

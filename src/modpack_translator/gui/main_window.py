@@ -454,6 +454,9 @@ class MainWindow(QMainWindow):
         remote = self.backend_remote_radio.isChecked()
         self.local_box.setVisible(not remote)
         self.remote_box.setVisible(remote)
+        # 切換模式後，先前的測試連線結果（✓/✗）已不適用，清空避免混淆
+        if hasattr(self, "test_conn_label"):
+            self.test_conn_label.setText("")
         self._save_remote_settings()
 
     def _toggle_key_visibility(self, checked: bool):

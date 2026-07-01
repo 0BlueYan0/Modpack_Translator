@@ -155,8 +155,9 @@ endpoint (OpenAI, OpenRouter, Groq, self-hosted vLLM, etc.).
 "Test connection" to verify. Settings are saved locally.
 
 **CLI / advanced:** Set `backend_mode: "remote"` plus `remote_base_url` / `remote_api_key` /
-`remote_model` in `configs/model.yaml`, or override with the environment variables
-`MODPACK_TRANSLATOR_REMOTE_URL` / `MODPACK_TRANSLATOR_REMOTE_API_KEY` / `MODPACK_TRANSLATOR_REMOTE_MODEL`.
+`remote_model` in `configs/model.yaml`. Leave any of these blank to fall back to the
+environment variables `MODPACK_TRANSLATOR_REMOTE_URL` / `MODPACK_TRANSLATOR_REMOTE_API_KEY` /
+`MODPACK_TRANSLATOR_REMOTE_MODEL` — a non-blank config value always takes precedence.
 
 Note: remote mode is billed per provider (modpacks contain many strings), but the translation
 cache means re-runs only pay for new strings.
