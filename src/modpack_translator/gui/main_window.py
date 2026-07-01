@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt, QSettings, QThread, QTimer, Signal
 from PySide6.QtGui import QFont, QIcon, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QFileDialog,
     QFormLayout,
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QRadioButton,
     QSpinBox,
     QTextEdit,
     QVBoxLayout,
@@ -77,6 +79,7 @@ class MainWindow(QMainWindow):
         self._scan_worker: ScanWorker | None = None
         self._update_check_worker: UpdateCheckWorker | None = None
         self._update_download_worker: UpdateDownloadWorker | None = None
+        self._conn_test_worker = None
 
         self._translated_modpack_path: str = ""
         self._translation_start_time: float = 0.0
@@ -116,6 +119,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         apply_theme(self._theme_mode)
         self._update_theme_button()
+        self._load_remote_settings()
         QTimer.singleShot(1200, self._check_for_updates)
 
     @staticmethod
@@ -181,10 +185,34 @@ class MainWindow(QMainWindow):
 
         # ── 模型設定群組 ──────────────────────────────────────────────────
         model_group = QGroupBox("模型設定")
-        mgf = QFormLayout(model_group)
+        model_vbox = QVBoxLayout(model_group)
+
+        # 後端模式切換
+        mode_row = QHBoxLayout()
+        self.backend_local_radio = QRadioButton("本地模型")
+        self.backend_remote_radio = QRadioButton("遠端 API")
+        self.backend_local_radio.setChecked(True)
+        self._backend_group = QButtonGroup(self)
+        self._backend_group.addButton(self.backend_local_radio)
+        self._backend_group.addButton(self.backend_remote_radio)
+        self.backend_local_radio.toggled.connect(self._on_backend_mode_changed)
+        mode_help = _make_help_label(
+            "本地模型：使用本機 llama.cpp server（需先執行初始化腳本）。\n"
+            "遠端 API：使用 OpenAI 相容的遠端端點（OpenAI / OpenRouter / Groq / 自架 vLLM…）。"
+        )
+        mode_row.addWidget(QLabel("後端模式："))
+        mode_row.addWidget(self.backend_local_radio)
+        mode_row.addWidget(self.backend_remote_radio)
+        mode_row.addWidget(mode_help)
+        mode_row.addStretch()
+        model_vbox.addLayout(mode_row)
+
+        # ── 本地模型欄位（容器，遠端模式時整塊隱藏）───────────────────────
+        self.local_box = QWidget()
+        mgf = QFormLayout(self.local_box)
+        mgf.setContentsMargins(0, 0, 0, 0)
         mgf.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
 
-        # LoRA 適配器路徑
         lora_row = QHBoxLayout()
         self.lora_edit = QLineEdit()
         self.lora_edit.setText(
@@ -202,7 +230,6 @@ class MainWindow(QMainWindow):
         lora_row.addWidget(lora_help)
         mgf.addRow("LoRA 適配器：", lora_row)
 
-        # 基礎模型路徑（可選）
         base_row = QHBoxLayout()
         self.base_gguf_edit = QLineEdit()
         self.base_gguf_edit.setPlaceholderText("留空自動下載（約 5 GB，僅首次）")
@@ -219,7 +246,6 @@ class MainWindow(QMainWindow):
         base_row.addWidget(base_help)
         mgf.addRow("基礎模型：", base_row)
 
-        # GPU 層數
         gpu_row = QHBoxLayout()
         self.gpu_layers_spin = QSpinBox()
         self.gpu_layers_spin.setRange(-1, 200)
@@ -236,6 +262,65 @@ class MainWindow(QMainWindow):
         gpu_row.addWidget(gpu_help)
         gpu_row.addStretch()
         mgf.addRow("GPU 層數：", gpu_row)
+
+        model_vbox.addWidget(self.local_box)
+
+        # ── 遠端 API 欄位（容器，本地模式時整塊隱藏）─────────────────────
+        self.remote_box = QWidget()
+        rgf = QFormLayout(self.remote_box)
+        rgf.setContentsMargins(0, 0, 0, 0)
+        rgf.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+
+        self.remote_url_edit = QLineEdit()
+        self.remote_url_edit.setPlaceholderText("https://api.openai.com/v1")
+        self.remote_url_edit.textChanged.connect(self._save_remote_settings)
+        url_help = _make_help_label("遠端 OpenAI 相容端點的 Base URL，通常以 /v1 結尾。")
+        url_row = QHBoxLayout()
+        url_row.addWidget(self.remote_url_edit)
+        url_row.addWidget(url_help)
+        rgf.addRow("Base URL：", url_row)
+
+        self.remote_key_edit = QLineEdit()
+        self.remote_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.remote_key_edit.setPlaceholderText("sk-...")
+        self.remote_key_edit.textChanged.connect(self._save_remote_settings)
+        self.remote_key_show_btn = QPushButton("👁")
+        self.remote_key_show_btn.setCheckable(True)
+        self.remote_key_show_btn.setFixedWidth(36)
+        self.remote_key_show_btn.setToolTip("顯示 / 隱藏金鑰")
+        self.remote_key_show_btn.toggled.connect(self._toggle_key_visibility)
+        key_help = _make_help_label("API 金鑰，儲存在本機 QSettings（明文）。自架且不需金鑰時可留空。")
+        key_row = QHBoxLayout()
+        key_row.addWidget(self.remote_key_edit)
+        key_row.addWidget(self.remote_key_show_btn)
+        key_row.addWidget(key_help)
+        rgf.addRow("API Key：", key_row)
+
+        self.remote_model_edit = QLineEdit()
+        self.remote_model_edit.setPlaceholderText("例如 gpt-4o-mini")
+        self.remote_model_edit.textChanged.connect(self._save_remote_settings)
+        model_help = _make_help_label("遠端模型名稱，需與該端點提供的模型一致。")
+        rmodel_row = QHBoxLayout()
+        rmodel_row.addWidget(self.remote_model_edit)
+        rmodel_row.addWidget(model_help)
+        rgf.addRow("模型名稱：", rmodel_row)
+
+        test_row = QHBoxLayout()
+        self.test_conn_btn = QPushButton("測試連線")
+        self.test_conn_btn.setFixedWidth(96)
+        self.test_conn_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.test_conn_btn.clicked.connect(self._on_test_connection)
+        self.test_conn_label = QLabel("")
+        self.test_conn_label.setObjectName("statsLabel")
+        test_help = _make_help_label("以極短請求測試 URL／金鑰／模型名是否正確（約消耗 1 個 token）。")
+        test_row.addWidget(self.test_conn_btn)
+        test_row.addWidget(self.test_conn_label)
+        test_row.addWidget(test_help)
+        test_row.addStretch()
+        rgf.addRow("", test_row)
+
+        model_vbox.addWidget(self.remote_box)
+        self.remote_box.setVisible(False)
 
         root_layout.addWidget(model_group)
 
@@ -363,6 +448,54 @@ class MainWindow(QMainWindow):
         if path:
             self.base_gguf_edit.setText(path)
 
+    # ------------------------------------------------------------------ 後端模式 / 遠端設定
+
+    def _on_backend_mode_changed(self, *_):
+        remote = self.backend_remote_radio.isChecked()
+        self.local_box.setVisible(not remote)
+        self.remote_box.setVisible(remote)
+        self._save_remote_settings()
+
+    def _toggle_key_visibility(self, checked: bool):
+        self.remote_key_edit.setEchoMode(
+            QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
+        )
+
+    def _load_remote_settings(self):
+        self.remote_url_edit.setText(self._settings.value("model/remote_base_url", "") or "")
+        self.remote_key_edit.setText(self._settings.value("model/remote_api_key", "") or "")
+        self.remote_model_edit.setText(self._settings.value("model/remote_model", "") or "")
+        mode = self._settings.value("model/backend_mode", "local") or "local"
+        if mode == "remote":
+            self.backend_remote_radio.setChecked(True)
+        else:
+            self.backend_local_radio.setChecked(True)
+        self._on_backend_mode_changed()
+
+    def _save_remote_settings(self, *_):
+        mode = "remote" if self.backend_remote_radio.isChecked() else "local"
+        self._settings.setValue("model/backend_mode", mode)
+        self._settings.setValue("model/remote_base_url", self.remote_url_edit.text().strip())
+        self._settings.setValue("model/remote_api_key", self.remote_key_edit.text().strip())
+        self._settings.setValue("model/remote_model", self.remote_model_edit.text().strip())
+
+    def _on_test_connection(self):
+        base = self.remote_url_edit.text().strip()
+        model = self.remote_model_edit.text().strip()
+        key = self.remote_key_edit.text().strip()
+        if not base or not model:
+            self.test_conn_label.setText("✗ 請先填寫 Base URL 與模型名稱")
+            return
+        self.test_conn_btn.setEnabled(False)
+        self.test_conn_label.setText("測試中…")
+        self._conn_test_worker = ConnTestWorker(base, key, model)
+        self._conn_test_worker.done.connect(self._on_test_connection_done)
+        self._conn_test_worker.start()
+
+    def _on_test_connection_done(self, ok: bool, msg: str):
+        self.test_conn_btn.setEnabled(True)
+        self.test_conn_label.setText(("✓ " if ok else "✗ ") + msg)
+
     # ------------------------------------------------------------------ 複製
 
     def _copy_log(self):
@@ -472,6 +605,14 @@ class MainWindow(QMainWindow):
         cfg.model.lora_gguf_path = self.lora_edit.text().strip() or cfg.model.lora_gguf_path
         cfg.model.base_gguf_path = self.base_gguf_edit.text().strip()
         cfg.model.n_gpu_layers   = self.gpu_layers_spin.value()
+
+        if self.backend_remote_radio.isChecked():
+            cfg.model.backend_mode = "remote"
+            cfg.model.remote_base_url = self.remote_url_edit.text().strip()
+            cfg.model.remote_api_key = self.remote_key_edit.text().strip()
+            cfg.model.remote_model = self.remote_model_edit.text().strip()
+        else:
+            cfg.model.backend_mode = "local"
         cfg.paths.create_output_dirs()
         return cfg
 
@@ -626,13 +767,19 @@ class MainWindow(QMainWindow):
         if cfg is None:
             return
 
-        lora_path = Path(cfg.model.lora_gguf_path)
-        if not lora_path.is_absolute():
-            lora_path = _PROJECT_ROOT / lora_path
-        if not lora_path.exists():
-            QMessageBox.warning(self, "找不到 LoRA 適配器",
-                                f"找不到 LoRA 適配器 GGUF：\n{lora_path}")
-            return
+        if cfg.model.backend_mode == "remote":
+            if not cfg.model.remote_base_url or not cfg.model.remote_model:
+                QMessageBox.warning(self, "遠端設定不完整",
+                                    "請先填寫遠端 API 的 Base URL 與模型名稱。")
+                return
+        else:
+            lora_path = Path(cfg.model.lora_gguf_path)
+            if not lora_path.is_absolute():
+                lora_path = _PROJECT_ROOT / lora_path
+            if not lora_path.exists():
+                QMessageBox.warning(self, "找不到 LoRA 適配器",
+                                    f"找不到 LoRA 適配器 GGUF：\n{lora_path}")
+                return
 
         modpack_path = Path(self.modpack_edit.text().strip()).resolve()
 
@@ -824,3 +971,18 @@ class UpdateDownloadWorker(QThread):
             self.finished_path.emit(str(path))
         except Exception as exc:
             self.error.emit(str(exc))
+
+
+class ConnTestWorker(QThread):
+    done = Signal(bool, str)
+
+    def __init__(self, base_url: str, api_key: str, model: str):
+        super().__init__()
+        self._base_url = base_url
+        self._api_key = api_key
+        self._model = model
+
+    def run(self):
+        from modpack_translator.pipeline.remote_translator import test_remote_connection
+        ok, msg = test_remote_connection(self._base_url, self._api_key, self._model)
+        self.done.emit(ok, msg)
