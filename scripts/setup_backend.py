@@ -461,7 +461,7 @@ def resolve_lora(cfg: dict) -> Path:
 
 def server_host_port(server_url: str) -> tuple[str, int]:
     parsed = urlparse(server_url)
-    return parsed.hostname or "127.0.0.1", parsed.port or 8080
+    return parsed.hostname or "127.0.0.1", parsed.port or 8888
 
 
 def ensure_server_port_free(cfg: dict) -> None:
