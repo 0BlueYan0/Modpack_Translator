@@ -23,7 +23,8 @@ from modpack_translator.pipeline.runner import (
     read_target_strings,
 )
 from modpack_translator.pipeline.scanner import ModpackScanner, TranslationTarget, resolve_game_root
-from modpack_translator.pipeline.translator import GGUFTranslator
+from modpack_translator.pipeline._chat import TranslatorFatalError
+from modpack_translator.pipeline.translator import build_translator
 
 # src/modpack_translator/gui/ → 上 4 層到專案根目錄
 _PROJECT_ROOT = Path(__file__).parents[3]
@@ -134,7 +135,7 @@ class TranslateWorker(QThread):
         self._modpack_path = modpack_path
         self._retry_count  = retry_count
         self._cancel       = False
-        self._translator: GGUFTranslator | None = None
+        self._translator = None
 
     def cancel(self):
         self._cancel = True
@@ -163,10 +164,13 @@ class TranslateWorker(QThread):
                 backed_up = backup_quest_configs(game_root)
                 self.log.emit(f"已備份 {backed_up} 個任務/設定資料夾至 quests_bak/")
 
-            self.log.emit("正在連線或啟動本機模型服務，請稍候…")
+            if self._cfg.model.backend_mode == "remote":
+                self.log.emit("正在連線遠端 API，請稍候…")
+            else:
+                self.log.emit("正在連線或啟動本機模型服務，請稍候…")
             translator = None
             try:
-                translator = GGUFTranslator(self._cfg.model, self._cfg.language.system_prompt)
+                translator = build_translator(self._cfg.model, self._cfg.language.system_prompt)
                 self._translator = translator
             except Exception as exc:
                 self.error.emit(f"模型服務啟動失敗：{exc}")
@@ -206,6 +210,8 @@ class TranslateWorker(QThread):
                         # total_pairs_done 已由 _on_pair_done 累加，不再重複計算
                         if failed:
                             failed_by_target[failed_target_name(target)] = failed
+                    except TranslatorFatalError:
+                        raise
                     except Exception as exc:
                         self.log.emit(f"[警告] 略過 {target.mod_id}/{target.format}：{exc}")
                         continue

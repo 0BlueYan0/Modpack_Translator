@@ -24,7 +24,8 @@ from modpack_translator.pipeline.runner import (
     read_target_strings,
 )
 from modpack_translator.pipeline.scanner import ModpackScanner, TranslationTarget, resolve_game_root
-from modpack_translator.pipeline.translator import GGUFTranslator
+from modpack_translator.pipeline._chat import TranslatorFatalError
+from modpack_translator.pipeline.translator import build_translator
 from tqdm import tqdm
 
 _PROJECT_ROOT = Path(__file__).parent.parent
@@ -165,8 +166,11 @@ def main():
         backed_up = backup_quest_configs(game_root)
         print(f"已備份 {backed_up} 個任務/設定資料夾至 quests_bak/")
 
-    print("\n正在連線或啟動本機模型服務…")
-    translator = GGUFTranslator(cfg.model, cfg.language.system_prompt)
+    if cfg.model.backend_mode == "remote":
+        print("\n正在連線遠端 API…")
+    else:
+        print("\n正在連線或啟動本機模型服務…")
+    translator = build_translator(cfg.model, cfg.language.system_prompt)
 
     try:
         cache = _load_cache(cache_path)
@@ -184,6 +188,8 @@ def main():
                 total_fallback += n_f
                 if failed:
                     failed_by_target[failed_target_name(target)] = failed
+            except TranslatorFatalError:
+                raise
             except Exception as exc:
                 tqdm.write(f"[警告] 略過 {target.mod_id}/{target.format}：{exc}")
                 continue
