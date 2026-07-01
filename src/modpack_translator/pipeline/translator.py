@@ -12,6 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from modpack_translator.config import ModelConfig
+from modpack_translator.pipeline._chat import normalize_base_url, stream_chat
 
 _PROJECT_ROOT = Path(__file__).parents[3]
 _RUNTIME_BACKEND = _PROJECT_ROOT / ".runtime" / "backend.json"
@@ -148,11 +149,6 @@ def _load_runtime_backend() -> dict:
         raise RuntimeError(f"Invalid backend config: {_RUNTIME_BACKEND}: {exc}") from exc
 
 
-def _normalize_base_url(url: str) -> str:
-    url = url.rstrip("/")
-    return url[:-3] if url.endswith("/v1") else url
-
-
 def _as_command(value: str | list[str] | None) -> list[str]:
     if value is None:
         return []
@@ -284,7 +280,7 @@ class GGUFTranslator:
             or runtime.get("server_model")
             or cfg.server_model
         )
-        self._base_url = _normalize_base_url(server_url)
+        self._base_url = normalize_base_url(server_url)
         self._server_process: subprocess.Popen | None = None
         self._server_job: _WindowsJob | None = None
 
@@ -400,26 +396,25 @@ class GGUFTranslator:
             pass
 
     def translate(self, text: str, cancel_check: Callable[[], bool] | None = None) -> str:
-        """
-        翻譯單條字串，使用串流模式逐 token 生成。
+        """翻譯單條字串，使用串流模式逐 token 生成。
+
         cancel_check 若回傳 True，立即中止並回傳空字串（使後處理驗證失敗，安全回退至原文）。
         """
-        chunks: list[str] = []
-        stream = self._client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {"role": "system", "content": self._system_prompt},
-                {"role": "user",   "content": text},
-            ],
+        return stream_chat(
+            self._client,
+            self._model,
+            self._system_prompt,
+            text,
             max_tokens=self._cfg.max_tokens,
             temperature=self._cfg.temperature,
-            stream=True,
             extra_body={"repeat_penalty": self._cfg.repeat_penalty},
+            cancel_check=cancel_check,
         )
-        for chunk in stream:
-            if cancel_check is not None and cancel_check():
-                return ""   # 強制後處理失敗 → 安全回退至原文
-            delta = chunk.choices[0].delta
-            if delta.content:
-                chunks.append(delta.content)
-        return "".join(chunks).strip()
+
+
+def build_translator(cfg: ModelConfig, system_prompt: str):
+    """依 backend_mode 回傳對應的 translator。介面一致：translate() / close() / context manager。"""
+    if cfg.backend_mode == "remote":
+        from modpack_translator.pipeline.remote_translator import RemoteTranslator
+        return RemoteTranslator(cfg, system_prompt)
+    return GGUFTranslator(cfg, system_prompt)
