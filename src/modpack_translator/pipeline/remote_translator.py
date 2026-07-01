@@ -1,0 +1,88 @@
+from __future__ import annotations
+
+import os
+from typing import Callable
+
+from openai import OpenAI
+
+from modpack_translator.config import ModelConfig
+from modpack_translator.pipeline._chat import (
+    TranslatorFatalError,
+    describe_openai_error,
+    normalize_base_url,
+    stream_chat,
+)
+
+
+class RemoteTranslator:
+    """對遠端 OpenAI 相容 API 做串流翻譯。無本地 server 生命週期，close() 為 no-op。"""
+
+    def __init__(self, cfg: ModelConfig, system_prompt: str) -> None:
+        base_url = os.getenv("MODPACK_TRANSLATOR_REMOTE_URL") or cfg.remote_base_url
+        api_key = os.getenv("MODPACK_TRANSLATOR_REMOTE_API_KEY") or cfg.remote_api_key
+        model = os.getenv("MODPACK_TRANSLATOR_REMOTE_MODEL") or cfg.remote_model
+
+        if not base_url:
+            raise TranslatorFatalError("未設定遠端 API Base URL。")
+        if not model:
+            raise TranslatorFatalError("未設定遠端模型名稱。")
+
+        self._cfg = cfg
+        self._model = model
+        self._system_prompt = system_prompt
+        self._client = OpenAI(
+            base_url=f"{normalize_base_url(base_url)}/v1",
+            api_key=api_key or "not-needed",
+        )
+
+    def translate(self, text: str, cancel_check: Callable[[], bool] | None = None) -> str:
+        return stream_chat(
+            self._client,
+            self._model,
+            self._system_prompt,
+            text,
+            max_tokens=self._cfg.max_tokens,
+            temperature=self._cfg.temperature,
+            extra_body=None,  # 遠端只送標準 OpenAI 參數，不送 repeat_penalty
+            cancel_check=cancel_check,
+        )
+
+    def close(self) -> None:
+        return None
+
+    def __enter__(self) -> "RemoteTranslator":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+
+def test_remote_connection(
+    base_url: str,
+    api_key: str,
+    model: str,
+    timeout: float = 15.0,
+) -> tuple[bool, str]:
+    """用 1-token 的 chat completion 探測，一次驗證 URL／金鑰／模型名。
+
+    回傳 (ok, 訊息)。訊息為繁中，可直接顯示於 GUI。
+    """
+    if not base_url:
+        return False, "請先填寫 Base URL"
+    if not model:
+        return False, "請先填寫模型名稱"
+    try:
+        client = OpenAI(
+            base_url=f"{normalize_base_url(base_url)}/v1",
+            api_key=api_key or "not-needed",
+            timeout=timeout,
+        )
+        client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "ping"}],
+            max_tokens=1,
+            stream=False,
+        )
+        return True, "連線成功"
+    except Exception as exc:  # noqa: BLE001 — 測試連線要吞下所有例外轉成訊息
+        return False, describe_openai_error(exc)
