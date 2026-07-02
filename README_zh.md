@@ -1,4 +1,4 @@
-# Minecraft模組包翻譯器 v1.5.1
+# Minecraft模組包翻譯器 v1.5.2
 
 **Language / 語言：** [English](README.md) | 繁體中文
 
@@ -104,7 +104,7 @@ cuDNN **不需要**安裝。
 setup_windows.bat
 ```
 
-初始化完成後，Windows 會在專案資料夾建立版本化 launcher，例如 `模組包翻譯器v1.5.1.exe`。之後直接雙擊它即可啟動程式，不需要開終端機手動輸入命令。若 launcher 遺失，請重新執行 setup，或手動建立：
+初始化完成後，Windows 會在專案資料夾建立版本化 launcher，例如 `模組包翻譯器v1.5.2.exe`。之後直接雙擊它即可啟動程式，不需要開終端機手動輸入命令。若 launcher 遺失，請重新執行 setup，或手動建立：
 
 ```bat
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_windows_launcher.ps1
@@ -211,7 +211,7 @@ paths:
 uv run python main.py
 ```
 
-Windows 使用者也可以直接雙擊版本化 launcher，例如 `模組包翻譯器v1.5.1.exe`；它會先檢查是否已完成 setup，再在背景執行 `uv run python main.py`，launcher 錯誤會寫到 `.runtime/launcher.log`。
+Windows 使用者也可以直接雙擊版本化 launcher，例如 `模組包翻譯器v1.5.2.exe`；它會先檢查是否已完成 setup，再在背景執行 `uv run python main.py`，launcher 錯誤會寫到 `.runtime/launcher.log`。
 
 啟動時，程式會在背景檢查最新 GitHub Release。有新版 release package 時才顯示更新視窗；沒有更新時不顯示任何訊息。自動更新會下載 release ZIP，若有 SHA256 檔會先驗證，接著套用新版原始碼、移除舊 `.venv` 與過期的本機後端 runtime 檔案、重新執行 setup，完成後再啟動新版程式。
 
@@ -313,7 +313,7 @@ uv run python scripts/translate_modpack.py --modpack "C:/CurseForge/Instances/AT
 **Q：ZIP 使用者要怎麼更新？**
 - 開啟程式即可。如果 GitHub Release 有新版，更新視窗會出現，按 **自動更新**。
 - updater 會保留使用者輸出與備份，但會重建 `.venv` 和本機後端設定，避免依賴衝突。
-- Release ZIP 由 GitHub Actions 根據 `v1.5.1` 這類 tag 自動產生。
+- Release ZIP 由 GitHub Actions 根據 `v1.5.2` 這類 tag 自動產生。
 
 **Q：掃描找不到任何可翻譯的檔案。**
 - 確認選擇的是正確的資料夾，應包含 `mods/` 或 `config/` 子資料夾。
