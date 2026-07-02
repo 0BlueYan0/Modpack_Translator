@@ -35,3 +35,13 @@ model:
   remote_base_url: ""      # 例如 https://api.openai.com/v1
   remote_api_key: ""       # 例如 sk-...
   remote_model: ""         # 例如 gpt-4o-mini
+
+  # ── 遠端批次預翻譯（僅 backend_mode: "remote" 時生效）─────────────
+  # 翻譯開始前先把所有待翻字串去重、以「每批 remote_batch_size 條 ×
+  # remote_concurrency 條併發請求」批次翻進快取，再走原本逐檔流程（幾乎全快取命中）。
+  # 批次翻譯失敗的字串會自動回退到原本的逐條分段重試，不影響翻譯品質。
+  remote_prefill: true
+  remote_batch_size: 12         # 每個請求包含的字串數（1–64；1 = 僅併發不合批）
+  remote_concurrency: 6         # 同時在途的請求數（1–32；過高可能觸發 429 速率限制）
+  remote_timeout_s: 120.0       # 每請求逾時秒數（串流 read timeout）
+  remote_backoff_retries: 4     # 429／逾時／5xx 時每批的指數退避重試次數（0–10）

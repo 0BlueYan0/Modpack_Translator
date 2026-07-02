@@ -9,6 +9,7 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 
 from modpack_translator.config import AppConfig
+from modpack_translator.pipeline.batch_prefill import prefill_translation_cache
 from modpack_translator.pipeline.patcher import (
     backup_mods,
     backup_quest_configs,
@@ -119,6 +120,7 @@ class TranslateWorker(QThread):
     log          = Signal(str)
     progress     = Signal(int, int, str, str, int) # current_idx, total, mod_id, format, pairs_done_so_far
     pair_progress = Signal(int)               # 每條字串完成後：累計已處理對數
+    prefill_progress = Signal(int, int)       # 批次預翻譯：已完成/總數（去重後字串）
     finished     = Signal(int, int, int, int) # translated, cached, fallback, failed_files
     error    = Signal(str)
 
@@ -177,6 +179,22 @@ class TranslateWorker(QThread):
                 return
             try:
                 self.log.emit("模型服務已就緒，開始翻譯…")
+
+                # 遠端模式：先把所有待翻字串批次併發翻進快取，
+                # 之後逐檔階段幾乎全是快取命中；失敗字串走既有逐條分段重試。
+                if self._cfg.model.backend_mode == "remote" and self._cfg.model.remote_prefill:
+                    prefill_translation_cache(
+                        self._targets,
+                        self._cfg.model,
+                        self._cfg.language.system_prompt,
+                        self._cfg.language.code,
+                        cache,
+                        cancel_check=lambda: self._cancel,
+                        on_progress=lambda done, tot: self.prefill_progress.emit(done, tot),
+                        on_log=self.log.emit,
+                        flush_cache=lambda: _flush_cache(cache_path, cache),
+                    )
+                    _flush_cache(cache_path, cache)
 
                 # 每條字串完成後觸發：更新累計數並節流發送信號（每 0.5 秒最多 1 次）
                 _last_emit_t = [0.0]

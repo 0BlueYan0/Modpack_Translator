@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from modpack_translator.config import load_config
+from modpack_translator.pipeline.batch_prefill import prefill_translation_cache
 from modpack_translator.pipeline.patcher import (
     backup_mods,
     backup_quest_configs,
@@ -49,6 +50,32 @@ def parse_args():
         default=0,
         metavar="N",
         help="後處理驗證失敗時每個字串的重試次數（預設：0）",
+    )
+    p.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        metavar="N",
+        help="遠端批次預翻譯：每個請求的字串數（預設取 model.yaml 的 remote_batch_size）",
+    )
+    p.add_argument(
+        "--concurrency",
+        type=int,
+        default=None,
+        metavar="M",
+        help="遠端批次預翻譯：併發請求數（預設取 model.yaml 的 remote_concurrency）",
+    )
+    p.add_argument(
+        "--request-timeout",
+        type=float,
+        default=None,
+        metavar="SEC",
+        help="遠端每請求逾時秒數（預設取 model.yaml 的 remote_timeout_s）",
+    )
+    p.add_argument(
+        "--no-prefill",
+        action="store_true",
+        help="停用遠端批次預翻譯（回到逐條序列翻譯）",
     )
     return p.parse_args()
 
@@ -123,6 +150,14 @@ def main():
     modpack_path = Path(args.modpack).resolve()
 
     cfg = load_config(args.model_config, args.paths_config, args.language)
+    if args.batch_size is not None:
+        cfg.model.remote_batch_size = args.batch_size
+    if args.concurrency is not None:
+        cfg.model.remote_concurrency = args.concurrency
+    if args.request_timeout is not None:
+        cfg.model.remote_timeout_s = args.request_timeout
+    if args.no_prefill:
+        cfg.model.remote_prefill = False
     cfg.paths.create_output_dirs()
 
     cache_path = cfg.paths.translation_cache
@@ -181,6 +216,29 @@ def main():
         total_translated = total_cached = total_fallback = 0
         cache_dirty = 0
         failed_by_target: dict[str, dict[str, str]] = {}
+
+        # 遠端模式：先把所有待翻字串批次併發翻進快取，逐檔階段幾乎全快取命中
+        if cfg.model.backend_mode == "remote" and cfg.model.remote_prefill:
+            bar = tqdm(total=0, desc="批次預翻譯", unit="str")
+
+            def _on_prefill_progress(done: int, total: int) -> None:
+                if bar.total != total:
+                    bar.total = total
+                bar.n = done
+                bar.refresh()
+
+            prefill_translation_cache(
+                all_targets,
+                cfg.model,
+                cfg.language.system_prompt,
+                cfg.language.code,
+                cache,
+                on_progress=_on_prefill_progress,
+                on_log=tqdm.write,
+                flush_cache=lambda: _flush_cache(cache_path, cache),
+            )
+            bar.close()
+            _flush_cache(cache_path, cache)
 
         for target in tqdm(all_targets, desc="翻譯中", unit="file"):
             try:

@@ -39,6 +39,13 @@ from modpack_translator.version import APP_NAME, APP_VERSION, __version__
 from scripts.updater import UpdateInfo, check_for_update, download_update, launch_apply_update
 
 
+def _to_int(value, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _make_help_label(tooltip_text: str) -> QPushButton:
     btn = QPushButton("?")
     btn.setObjectName("helpButton")
@@ -88,6 +95,9 @@ class MainWindow(QMainWindow):
         self._current_progress: int = 0
         self._pairs_done: int = 0
         self._translation_cancelled: bool = False
+        # 批次預翻譯階段（遠端模式）：進度條先顯示去重後字串數，再切回逐檔對數
+        self._in_prefill: bool = False
+        self._prefill_total: int = 0
         # 滑動視窗速度計算：(timestamp, cumulative_pairs) 最近 500 筆
         self._speed_samples: deque = deque(maxlen=500)
 
@@ -310,6 +320,32 @@ class MainWindow(QMainWindow):
         rmodel_row.addWidget(model_help)
         rgf.addRow("模型名稱：", rmodel_row)
 
+        self.remote_conc_spin = QSpinBox()
+        self.remote_conc_spin.setRange(1, 32)
+        self.remote_conc_spin.setValue(6)
+        self.remote_conc_spin.valueChanged.connect(self._save_remote_settings)
+        conc_help = _make_help_label(
+            "批次預翻譯時同時在途的請求數。過高可能觸發供應商速率限制（429）。"
+        )
+        conc_row = QHBoxLayout()
+        conc_row.addWidget(self.remote_conc_spin)
+        conc_row.addWidget(conc_help)
+        conc_row.addStretch()
+        rgf.addRow("併發請求：", conc_row)
+
+        self.remote_batch_spin = QSpinBox()
+        self.remote_batch_spin.setRange(1, 64)
+        self.remote_batch_spin.setValue(12)
+        self.remote_batch_spin.valueChanged.connect(self._save_remote_settings)
+        batch_help = _make_help_label(
+            "每個請求一次翻譯的字串數。1 = 逐條送出（僅靠併發加速）。"
+        )
+        batch_row = QHBoxLayout()
+        batch_row.addWidget(self.remote_batch_spin)
+        batch_row.addWidget(batch_help)
+        batch_row.addStretch()
+        rgf.addRow("每批字串數：", batch_row)
+
         test_row = QHBoxLayout()
         self.test_conn_btn = QPushButton("測試連線")
         self.test_conn_btn.setFixedWidth(96)
@@ -482,12 +518,16 @@ class MainWindow(QMainWindow):
         key = self._settings.value("model/remote_api_key", "") or ""
         model = self._settings.value("model/remote_model", "") or ""
         mode = self._settings.value("model/backend_mode", "local") or "local"
+        conc = _to_int(self._settings.value("model/remote_concurrency"), 6)
+        batch = _to_int(self._settings.value("model/remote_batch_size"), 12)
 
         self._loading_settings = True
         try:
             self.remote_url_edit.setText(url)
             self.remote_key_edit.setText(key)
             self.remote_model_edit.setText(model)
+            self.remote_conc_spin.setValue(conc)
+            self.remote_batch_spin.setValue(batch)
             if mode == "remote":
                 self.backend_remote_radio.setChecked(True)
             else:
@@ -504,6 +544,8 @@ class MainWindow(QMainWindow):
         self._settings.setValue("model/remote_base_url", self.remote_url_edit.text().strip())
         self._settings.setValue("model/remote_api_key", self.remote_key_edit.text().strip())
         self._settings.setValue("model/remote_model", self.remote_model_edit.text().strip())
+        self._settings.setValue("model/remote_concurrency", int(self.remote_conc_spin.value()))
+        self._settings.setValue("model/remote_batch_size", int(self.remote_batch_spin.value()))
 
     def _on_test_connection(self):
         base = self.remote_url_edit.text().strip()
@@ -644,6 +686,8 @@ class MainWindow(QMainWindow):
             cfg.model.remote_base_url = self.remote_url_edit.text().strip()
             cfg.model.remote_api_key = self.remote_key_edit.text().strip()
             cfg.model.remote_model = self.remote_model_edit.text().strip()
+            cfg.model.remote_concurrency = self.remote_conc_spin.value()
+            cfg.model.remote_batch_size = self.remote_batch_spin.value()
         else:
             cfg.model.backend_mode = "local"
         cfg.paths.create_output_dirs()
@@ -655,12 +699,14 @@ class MainWindow(QMainWindow):
             self.translate_btn.setEnabled(len(self._scan_targets) > 0)
 
     def _update_stats_label(self):
+        # 預翻譯階段以「去重後字串數」計速/ETA，逐檔階段以掃描出的對數計
+        total = self._prefill_total if self._in_prefill else self._scan_total_pairs
         self.stats_label.setText(build_stats_text(
             now=time.monotonic(),
             start_time=self._translation_start_time,
             samples=self._speed_samples,
             pairs_done=self._pairs_done,
-            total_pairs=self._scan_total_pairs,
+            total_pairs=total,
         ))
 
     # ------------------------------------------------------------------ 掃描
@@ -797,6 +843,8 @@ class MainWindow(QMainWindow):
         self._current_progress = 0
         self._pairs_done = 0
         self._translation_cancelled = False
+        self._in_prefill = False
+        self._prefill_total = 0
         self._speed_samples.clear()
         self._update_stats_label()
         self.stats_label.setVisible(True)
@@ -813,12 +861,41 @@ class MainWindow(QMainWindow):
         self._translate_worker.log.connect(self._append_log)
         self._translate_worker.progress.connect(self._on_translate_progress)
         self._translate_worker.pair_progress.connect(self._on_pair_progress)
+        self._translate_worker.prefill_progress.connect(self._on_prefill_progress)
         self._translate_worker.finished.connect(self._on_translate_finished)
         self._translate_worker.error.connect(self._on_error)
         self._translate_worker.start()
 
+    def _on_prefill_progress(self, done: int, total: int):
+        """批次預翻譯階段（遠端模式）：進度條顯示去重後字串的完成數。
+
+        與逐檔階段的對數進度互不污染——預翻譯完全不碰 pair_progress，
+        第一個逐檔 progress 信號到達時由 _on_translate_progress 切回對數進度。
+        """
+        if not self._in_prefill:
+            self._in_prefill = True
+            self._speed_samples.clear()
+        self._prefill_total = total
+        self._pairs_done = done
+        self._speed_samples.append((time.monotonic(), done))
+        self.progress_bar.setRange(0, max(total, 1))
+        self.progress_bar.setValue(min(done, total))
+        self.progress_bar.setFormat(f"預翻譯 {done}/{total} 條")
+
+    def _exit_prefill_phase(self):
+        """預翻譯結束：進度條與速度統計重設回逐檔階段的對數語意。"""
+        self._in_prefill = False
+        n_pairs = self._scan_total_pairs if self._scan_total_pairs > 0 else self._translation_total
+        self.progress_bar.setRange(0, n_pairs)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("%p%")
+        self._pairs_done = 0
+        self._speed_samples.clear()
+
     def _on_translate_progress(self, current: int, total: int, mod_id: str, fmt: str, pairs_done: int):
         # 追蹤目前第幾個檔案並在 log 區顯示；進度條由 _on_pair_progress 逐條更新
+        if self._in_prefill:
+            self._exit_prefill_phase()
         self._current_progress = current + 1
         display_fmt = _FMT_NAME_MAP.get(fmt, fmt)
         self._append_log(f"({current + 1}/{total}) 翻譯 {mod_id}（{display_fmt}）…")

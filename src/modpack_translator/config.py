@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 MC_PACK_FORMAT: dict[str, int] = {
     "1.16.2": 6,  "1.16.5": 6,
@@ -52,6 +52,13 @@ class ModelConfig(BaseModel):
     remote_base_url: str = ""            # 例如 https://api.openai.com/v1
     remote_api_key: str = ""             # 例如 sk-...
     remote_model: str = ""               # 例如 gpt-4o-mini
+
+    # ── 遠端批次預翻譯（僅 backend_mode="remote" 時生效）──────
+    remote_prefill: bool = True
+    remote_batch_size: int = Field(default=12, ge=1, le=64)      # 每請求字串數
+    remote_concurrency: int = Field(default=6, ge=1, le=32)      # 併發請求數
+    remote_timeout_s: float = Field(default=120.0, gt=0)         # 每請求逾時（httpx read timeout）
+    remote_backoff_retries: int = Field(default=4, ge=0, le=10)  # 429/逾時/5xx 每批重試次數
 
 
 class PathsConfig(BaseModel):

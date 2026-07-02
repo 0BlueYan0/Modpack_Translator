@@ -14,20 +14,29 @@ from modpack_translator.pipeline._chat import (
 )
 
 
+def resolve_remote_settings(cfg: ModelConfig) -> tuple[str, str, str]:
+    """解析遠端連線設定，回傳 (base_url, api_key, model)。
+
+    明確設定（GUI QSettings 經 _build_cfg 注入，或 model.yaml）優先；
+    環境變數僅在對應欄位留空時作為備援填補。
+    缺 base_url／model 時拋 TranslatorFatalError。
+    """
+    base_url = cfg.remote_base_url or os.getenv("MODPACK_TRANSLATOR_REMOTE_URL", "")
+    api_key = cfg.remote_api_key or os.getenv("MODPACK_TRANSLATOR_REMOTE_API_KEY", "")
+    model = cfg.remote_model or os.getenv("MODPACK_TRANSLATOR_REMOTE_MODEL", "")
+
+    if not base_url:
+        raise TranslatorFatalError("未設定遠端 API Base URL。")
+    if not model:
+        raise TranslatorFatalError("未設定遠端模型名稱。")
+    return base_url, api_key, model
+
+
 class RemoteTranslator:
     """對遠端 OpenAI 相容 API 做串流翻譯。無本地 server 生命週期，close() 為 no-op。"""
 
     def __init__(self, cfg: ModelConfig, system_prompt: str) -> None:
-        # 明確設定（GUI QSettings 經 _build_cfg 注入，或 model.yaml）優先；
-        # 環境變數僅在對應欄位留空時作為備援填補。
-        base_url = cfg.remote_base_url or os.getenv("MODPACK_TRANSLATOR_REMOTE_URL", "")
-        api_key = cfg.remote_api_key or os.getenv("MODPACK_TRANSLATOR_REMOTE_API_KEY", "")
-        model = cfg.remote_model or os.getenv("MODPACK_TRANSLATOR_REMOTE_MODEL", "")
-
-        if not base_url:
-            raise TranslatorFatalError("未設定遠端 API Base URL。")
-        if not model:
-            raise TranslatorFatalError("未設定遠端模型名稱。")
+        base_url, api_key, model = resolve_remote_settings(cfg)
 
         self._cfg = cfg
         self._model = model
