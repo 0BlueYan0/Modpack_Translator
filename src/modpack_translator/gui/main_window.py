@@ -407,7 +407,7 @@ class MainWindow(QMainWindow):
         self.stats_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root_layout.addWidget(self.stats_label)
 
-        # ── 掃描結果面板 ──────────────────────────────────────────────────
+        # ── 輸出記錄面板 ──────────────────────────────────────────────────
         result_header = QHBoxLayout()
         result_lbl = QLabel("輸出記錄")
         result_lbl.setObjectName("sectionLabel")
