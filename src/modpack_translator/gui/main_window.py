@@ -34,6 +34,7 @@ _APP_ICON_PATH = _PROJECT_ROOT / "assets" / "icon" / "app_icon.png"
 from modpack_translator.config import load_config
 from modpack_translator.gui.theme import apply_theme, eye_icon, restyle
 from modpack_translator.gui.worker import ScanWorker, TranslateWorker
+from modpack_translator.gui.stats import build_stats_text
 from modpack_translator.version import APP_NAME, APP_VERSION, __version__
 from scripts.updater import UpdateInfo, check_for_update, download_update, launch_apply_update
 
@@ -89,7 +90,6 @@ class MainWindow(QMainWindow):
         self._translation_cancelled: bool = False
         # 滑動視窗速度計算：(timestamp, cumulative_pairs) 最近 500 筆
         self._speed_samples: deque = deque(maxlen=500)
-        self._last_pair_time: float = 0.0
 
         self._stats_timer = QTimer(self)
         self._stats_timer.setInterval(1000)
@@ -648,53 +648,14 @@ class MainWindow(QMainWindow):
         if not busy:
             self.translate_btn.setEnabled(len(self._scan_targets) > 0)
 
-    _SPEED_WINDOW = 30.0   # 秒，滑動視窗寬度
-    _STALL_SECS   = 8.0    # 超過此秒數無進度 → 顯示「翻譯中…」
-
     def _update_stats_label(self):
-        now = time.monotonic()
-        elapsed = now - self._translation_start_time
-        pairs_done = self._pairs_done
-
-        # 已用時間（始終精確）
-        elapsed_int = int(elapsed)
-        h, rem = divmod(elapsed_int, 3600)
-        m, s = divmod(rem, 60)
-        elapsed_str = f"{h:02d}:{m:02d}:{s:02d}"
-
-        # 判斷是否正在等待單次長推理
-        stalled = (now - self._last_pair_time) > self._STALL_SECS
-
-        if stalled:
-            # 模型正在推理一條較長的字串
-            speed_str = "翻譯中…"
-            eta_str   = "計算中…"
-        else:
-            # 滑動視窗：取最近 30 秒內的樣本計算速度
-            cutoff = now - self._SPEED_WINDOW
-            window = [(t, p) for t, p in self._speed_samples if t >= cutoff]
-            if len(window) >= 2:
-                dt = window[-1][0] - window[0][0]
-                dp = window[-1][1] - window[0][1]
-                if dt > 0 and dp > 0:
-                    speed = dp / dt
-                    total_pairs = max(self._scan_total_pairs, pairs_done + 1)
-                    remaining  = max(0, total_pairs - pairs_done)
-                    eta_int = int(remaining / speed)
-                    eh, erem = divmod(eta_int, 3600)
-                    em, es = divmod(erem, 60)
-                    speed_str = f"{speed:.1f}"
-                    eta_str   = f"{eh:02d}:{em:02d}:{es:02d}"
-                else:
-                    speed_str = "—"
-                    eta_str   = "—"
-            else:
-                speed_str = "—"
-                eta_str   = "—"
-
-        self.stats_label.setText(
-            f"速度：{speed_str} 句/秒  |  已用時間：{elapsed_str}  |  預計剩餘：{eta_str}"
-        )
+        self.stats_label.setText(build_stats_text(
+            now=time.monotonic(),
+            start_time=self._translation_start_time,
+            samples=self._speed_samples,
+            pairs_done=self._pairs_done,
+            total_pairs=self._scan_total_pairs,
+        ))
 
     # ------------------------------------------------------------------ 掃描
 
@@ -830,8 +791,7 @@ class MainWindow(QMainWindow):
         self._pairs_done = 0
         self._translation_cancelled = False
         self._speed_samples.clear()
-        self._last_pair_time = time.monotonic()
-        self.stats_label.setText("速度：— 句/秒  |  已用時間：00:00:00  |  預計剩餘：—")
+        self._update_stats_label()
         self.stats_label.setVisible(True)
         self._stats_timer.start()
 
@@ -855,7 +815,6 @@ class MainWindow(QMainWindow):
         """每條字串翻譯完成後（節流版）由 worker 呼叫，同步更新進度條與滑動視窗樣本。"""
         now = time.monotonic()
         self._pairs_done = pairs_done
-        self._last_pair_time = now
         self._speed_samples.append((now, pairs_done))
         # 進度條以字串對數平滑推進；clamp 防止估算差異造成超出 maximum
         self.progress_bar.setValue(min(pairs_done, self.progress_bar.maximum()))
