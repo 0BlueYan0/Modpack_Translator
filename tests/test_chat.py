@@ -35,7 +35,7 @@ class _Completions:
         self._capture.update(kwargs)
         if self._error is not None:
             raise self._error
-        return iter([_Chunk(c) for c in self._chunks])
+        return iter([_Chunk(c) if isinstance(c, str) else c for c in self._chunks])
 
 
 class _Chat:
@@ -62,6 +62,18 @@ def test_stream_chat_joins_chunks_and_strips():
     assert cap["model"] == "m"
     assert cap["stream"] is True
     assert "extra_body" not in cap
+
+
+def test_stream_chat_skips_chunks_without_choices():
+    # 部分 OpenAI 相容伺服器會在串流中夾帶 choices 為空的 chunk
+    # （例如最後附帶 usage 統計的 chunk），不可因此炸出 IndexError。
+    class _NoChoicesChunk:
+        choices = []
+
+    cap = {}
+    client = FakeClient([_NoChoicesChunk(), "你好", _NoChoicesChunk(), "世界"], cap)
+    out = stream_chat(client, "m", "sys", "hi", max_tokens=10, temperature=0.0)
+    assert out == "你好世界"
 
 
 def test_stream_chat_passes_extra_body_when_given():

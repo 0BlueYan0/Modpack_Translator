@@ -77,6 +77,9 @@ def stream_chat(
         for chunk in stream:
             if cancel_check is not None and cancel_check():
                 return ""
+            # 部分伺服器會夾帶 choices 為空的 chunk（如串流結尾的 usage 統計）
+            if not chunk.choices:
+                continue
             delta = chunk.choices[0].delta
             if delta.content:
                 chunks.append(delta.content)
