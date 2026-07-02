@@ -233,6 +233,7 @@ def main():
                 cfg.language.system_prompt,
                 cfg.language.code,
                 cache,
+                retry_count=args.retry,
                 on_progress=_on_prefill_progress,
                 on_log=tqdm.write,
                 flush_cache=lambda: _flush_cache(cache_path, cache),

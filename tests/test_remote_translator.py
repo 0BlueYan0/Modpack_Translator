@@ -79,6 +79,27 @@ def test_remote_cfg_beats_env_and_env_fills_blank(monkeypatch):
     monkeypatch.delenv("MODPACK_TRANSLATOR_REMOTE_MODEL", raising=False)
 
 
+def test_remote_client_sets_timeout_and_no_sdk_retries(monkeypatch):
+    # 殘餘逐條呼叫不可依賴 SDK 預設（600s timeout × 隱性重試 ×2）——
+    # 逾時須跟 remote_timeout_s，重試由上層分段階梯管理。
+    captured = {}
+
+    def factory(**kw):
+        captured.update(kw)
+        return FakeClient(["好"])
+
+    monkeypatch.setattr(rt, "OpenAI", factory)
+    cfg = ModelConfig(
+        backend_mode="remote",
+        remote_base_url="http://x/v1",
+        remote_model="m",
+        remote_timeout_s=77.0,
+    )
+    rt.RemoteTranslator(cfg, "sys")
+    assert captured["timeout"] == 77.0
+    assert captured["max_retries"] == 0
+
+
 def test_remote_init_requires_url_and_model(monkeypatch):
     monkeypatch.setattr(rt, "OpenAI", lambda **kw: FakeClient())
     import pytest

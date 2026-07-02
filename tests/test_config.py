@@ -16,7 +16,7 @@ def test_model_config_prefill_defaults():
     c = ModelConfig()
     assert c.remote_prefill is True
     assert c.remote_batch_size == 12
-    assert c.remote_concurrency == 6
+    assert c.remote_concurrency == 16
     assert c.remote_timeout_s == 120.0
     assert c.remote_backoff_retries == 4
 
@@ -28,8 +28,9 @@ def test_model_config_prefill_bounds():
         ModelConfig(remote_batch_size=65)
     with pytest.raises(ValidationError):
         ModelConfig(remote_concurrency=0)
+    assert ModelConfig(remote_concurrency=64).remote_concurrency == 64
     with pytest.raises(ValidationError):
-        ModelConfig(remote_concurrency=33)
+        ModelConfig(remote_concurrency=65)
     with pytest.raises(ValidationError):
         ModelConfig(remote_timeout_s=0)
     with pytest.raises(ValidationError):

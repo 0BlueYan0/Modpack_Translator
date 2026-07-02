@@ -342,11 +342,12 @@ class MainWindow(QMainWindow):
         rgf.addRow("模型名稱：", rmodel_row)
 
         self.remote_conc_spin = QSpinBox()
-        self.remote_conc_spin.setRange(1, 32)
-        self.remote_conc_spin.setValue(6)
+        self.remote_conc_spin.setRange(1, 64)
+        self.remote_conc_spin.setValue(16)
         self.remote_conc_spin.valueChanged.connect(self._save_remote_settings)
         conc_help = _make_help_label(
-            "批次預翻譯時同時在途的請求數。過高可能觸發供應商速率限制（429）。"
+            "批次預翻譯時同時在途的請求數，翻譯速度幾乎與此成正比。"
+            "付費 API 可放心開大（16–32）；觸發速率限制（429）時會自動退避重試。"
         )
         conc_row = QHBoxLayout()
         conc_row.addWidget(self.remote_conc_spin)
@@ -539,7 +540,7 @@ class MainWindow(QMainWindow):
         key = self._settings.value("model/remote_api_key", "") or ""
         model = self._settings.value("model/remote_model", "") or ""
         mode = self._settings.value("model/backend_mode", "local") or "local"
-        conc = _to_int(self._settings.value("model/remote_concurrency"), 6)
+        conc = _to_int(self._settings.value("model/remote_concurrency"), 16)
         batch = _to_int(self._settings.value("model/remote_batch_size"), 12)
 
         self._loading_settings = True

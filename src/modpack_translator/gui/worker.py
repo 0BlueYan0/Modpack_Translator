@@ -180,8 +180,8 @@ class TranslateWorker(QThread):
             try:
                 self.log.emit("模型服務已就緒，開始翻譯…")
 
-                # 遠端模式：先把所有待翻字串批次併發翻進快取，
-                # 之後逐檔階段幾乎全是快取命中；失敗字串走既有逐條分段重試。
+                # 遠端模式：先把所有待翻字串批次併發翻進快取（三輪收斂），
+                # 之後逐檔階段幾乎全是快取命中；極少數殘餘走既有逐條分段重試。
                 if self._cfg.model.backend_mode == "remote" and self._cfg.model.remote_prefill:
                     prefill_translation_cache(
                         self._targets,
@@ -189,6 +189,7 @@ class TranslateWorker(QThread):
                         self._cfg.language.system_prompt,
                         self._cfg.language.code,
                         cache,
+                        retry_count=self._retry_count,
                         cancel_check=lambda: self._cancel,
                         on_progress=lambda done, tot: self.prefill_progress.emit(done, tot),
                         on_log=self.log.emit,

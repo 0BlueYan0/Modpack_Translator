@@ -56,7 +56,7 @@ class ModelConfig(BaseModel):
     # ── 遠端批次預翻譯（僅 backend_mode="remote" 時生效）──────
     remote_prefill: bool = True
     remote_batch_size: int = Field(default=12, ge=1, le=64)      # 每請求字串數
-    remote_concurrency: int = Field(default=6, ge=1, le=32)      # 併發請求數
+    remote_concurrency: int = Field(default=16, ge=1, le=64)     # 併發請求數
     remote_timeout_s: float = Field(default=120.0, gt=0)         # 每請求逾時（httpx read timeout）
     remote_backoff_retries: int = Field(default=4, ge=0, le=10)  # 429/逾時/5xx 每批重試次數
 

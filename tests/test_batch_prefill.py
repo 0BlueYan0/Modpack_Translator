@@ -236,7 +236,21 @@ def test_collect_skips_unreadable_target(tmp_path):
     assert [i.source for i in items] == ["Feed the hungry wolves with fresh meat"]
 
 
-def test_collect_includes_patchouli_without_classify(tmp_path):
+def test_collect_excludes_non_translate_entries(tmp_path):
+    # diff_keys 內建 classify 過濾（_is_translatable_entry），所以預翻譯
+    # 不會浪費請求翻主迴圈只會複製的 copy/skip 條目。此測試釘住該保證，
+    # 並確認同來源在可翻鍵出現時仍會被收集（過濾發生在去重之前）。
+    sentence = "Written by the famous adventurer of the north"
+    target = _kubejs_target(tmp_path, {
+        "quest.a.author": sentence,                            # copy：跳過
+        "quest.b.desc": sentence,                              # 同來源但可翻：仍收
+        "quest.c.author": "Another proud author name here",    # copy 且無他處使用：不收
+    })
+    items = bp.collect_prefill_items([target], "zh_tw", {})
+    assert [i.source for i in items] == [sentence]
+
+
+def _patchouli_target(tmp_path) -> TranslationTarget:
     jar_path = tmp_path / "mod.jar"
     page = {
         "name": "Machine basics",
@@ -245,7 +259,7 @@ def test_collect_includes_patchouli_without_classify(tmp_path):
     entry_path = "assets/mod/patchouli_books/book/en_us/entries/basics.json"
     with zipfile.ZipFile(jar_path, "w") as zf:
         zf.writestr(entry_path, json.dumps(page))
-    target = TranslationTarget(
+    return TranslationTarget(
         source_file=jar_path,
         path_in_jar=entry_path,
         mod_id="mod",
@@ -253,8 +267,21 @@ def test_collect_includes_patchouli_without_classify(tmp_path):
         output_mode="jar_inject",
         target_path_in_jar=entry_path.replace("en_us", "zh_tw"),
     )
-    items = bp.collect_prefill_items([target], "zh_tw", {})
+
+
+def test_collect_includes_patchouli_without_classify(tmp_path):
+    items = bp.collect_prefill_items([_patchouli_target(tmp_path)], "zh_tw", {})
     assert "Long guide text about the crushing machine" in [i.source for i in items]
+
+
+def test_collect_marks_patchouli_items(tmp_path):
+    # 逐條救援要沿用 _translate_patchouli_text 階梯，收集時必須帶上格式旗標
+    items = bp.collect_prefill_items([_patchouli_target(tmp_path)], "zh_tw", {})
+    assert items and all(i.patchouli for i in items)
+
+    kub = _kubejs_target(tmp_path, {"quest.a.desc": "Feed the hungry wolves tonight"})
+    items2 = bp.collect_prefill_items([kub], "zh_tw", {})
+    assert items2 and not any(i.patchouli for i in items2)
 
 
 # ---------------------------------------------------------------- run_prefill
@@ -351,15 +378,17 @@ def test_run_prefill_failed_item_left_uncached_then_serial_fallback(monkeypatch)
     assert result["quest.bad.desc"] == "市長的譯文 %s 在此"
 
 
-def test_run_prefill_parse_failure_retries_once_then_gives_up(monkeypatch):
-    calls = _patch_client(monkeypatch, _script_handler(["垃圾回應", "還是垃圾"]))
+def test_run_prefill_parse_failure_cascades_rounds_then_gives_up(monkeypatch):
+    # 全程垃圾（非 JSON、無 CJK）：第 1 輪 1 批 ×2 次解析嘗試 →
+    # 第 2 輪 2 個單條批 ×2 → 第 3 輪逐條救援 ×1 —— 仍失敗則計入 failed
+    calls = _patch_client(monkeypatch, _script_handler(["GARBAGE {not json"]))
     items = _mk_items(2)
     cfg = _remote_cfg(remote_batch_size=2)
     cache: dict[str, str] = {}
     stats = bp.run_prefill(items, cfg, "sys", cache)
 
-    assert len(calls) == 2  # 原請求 + 一次解析重試
-    assert stats.batches_unparseable == 1
+    assert len(calls) == 8  # 2（第 1 輪）+ 4（第 2 輪）+ 2（第 3 輪）
+    assert stats.batches_unparseable == 3
     assert stats.failed == 2 and stats.translated == 0
     assert cache == {}
 
@@ -418,12 +447,16 @@ def test_run_prefill_timeout_is_retryable_not_fatal(monkeypatch):
     assert stats.translated == 1 and stats.failed == 0
 
 
-def test_run_prefill_non_429_4xx_gives_up_batch_without_retry(monkeypatch):
+def test_run_prefill_non_429_4xx_gives_up_without_retry_in_all_rounds(monkeypatch):
     req = httpx.Request("POST", "http://x")
     err = BadRequestError("bad request", response=httpx.Response(400, request=req), body=None)
     calls = _patch_client(monkeypatch, _script_handler([err]))
-    stats = bp.run_prefill(_mk_items(2), _remote_cfg(remote_batch_size=2), "sys", {})
-    assert len(calls) == 1  # 不重試
+    sleeps: list[float] = []
+    stats = bp.run_prefill(_mk_items(2), _remote_cfg(remote_batch_size=2), "sys", {},
+                           _sleep=sleeps.append)
+    # 第 1 輪 1 批 + 第 2 輪 2 個單條批 + 第 3 輪逐條 2 —— 每輪各恰 1 次請求、零退避
+    assert len(calls) == 5
+    assert sleeps == []
     assert stats.failed == 2 and stats.translated == 0
 
 
@@ -471,6 +504,245 @@ def test_run_prefill_flushes_cache_periodically(monkeypatch):
     assert len(flushes) == 2  # 每滿 2 條成功 flush 一次（5 條 → 2 次）
 
 
+# ---------------------------------------------------------------- 多輪搶救
+
+def _is_batch_call(kwargs) -> bool:
+    return "[Batch mode]" in kwargs["messages"][0]["content"]
+
+
+def test_run_prefill_round2_recovers_failed_multi_batches(monkeypatch):
+    # 第 1 輪整批失敗（>1 條）→ 以半批大小重試成功，不落入逐條救援
+    def handler(kwargs, idx):
+        payload = json.loads(kwargs["messages"][1]["content"])
+        if len(payload) > 2:
+            return "第一輪整批垃圾"
+        return json.dumps(
+            [{"id": e["id"], "text": "譯" + e["text"]} for e in payload],
+            ensure_ascii=False,
+        )
+
+    calls = _patch_client(monkeypatch, handler)
+    items = _mk_items(4)
+    cache: dict[str, str] = {}
+    stats = bp.run_prefill(items, _remote_cfg(remote_batch_size=4), "sys", cache)
+
+    assert stats.translated == 4 and stats.failed == 0
+    assert stats.round1_failed == 4
+    assert stats.round2_items == 4 and stats.round2_recovered == 4
+    assert stats.rescue_items == 0
+    for item in items:
+        assert cache[item.ck] == "譯" + item.source
+    # 第 1 輪 1 批（含 1 次解析重試）＝ 2 次；第 2 輪 2 批（每批 2 條）各 1 次
+    assert len(calls) == 4
+    assert all(_is_batch_call(kw) for kw in calls)
+
+
+def test_run_prefill_singleton_batch_failure_skips_round2_goes_rescue(monkeypatch):
+    # 單條批重送同樣的請求幾乎必然重蹈覆轍——直接進逐條救援（分段階梯）
+    def handler(kwargs, idx):
+        if _is_batch_call(kwargs):
+            return "批次全垃圾"
+        return "譯" + kwargs["messages"][1]["content"]
+
+    calls = _patch_client(monkeypatch, handler)
+    items = _mk_items(1)
+    cfg = _remote_cfg(remote_batch_size=8)
+    cache: dict[str, str] = {}
+    stats = bp.run_prefill(items, cfg, "sys", cache)
+
+    assert stats.translated == 1 and stats.failed == 0
+    assert stats.round2_items == 0
+    assert stats.rescue_items == 1 and stats.rescue_recovered == 1
+    assert cache[items[0].ck] == "譯" + items[0].source
+    batch_calls = [kw for kw in calls if _is_batch_call(kw)]
+    rescue_calls = [kw for kw in calls if not _is_batch_call(kw)]
+    assert len(batch_calls) == 2  # 第 1 輪原請求 + 解析重試；不進第 2 輪
+    assert len(rescue_calls) == 1
+    # 救援請求形狀與序列路徑一致：純 system prompt、單條 max_tokens
+    assert rescue_calls[0]["messages"][0]["content"] == "sys"
+    assert rescue_calls[0]["max_tokens"] == cfg.max_tokens
+
+
+def test_run_prefill_rescue_uses_generic_segmentation(monkeypatch):
+    # 整條翻不動的長字串，救援時沿用主迴圈的分段階梯逐段翻譯再重組
+    src = "The great crushing machine awaits\nFeed it with cobblestone daily"
+
+    def handler(kwargs, idx):
+        if _is_batch_call(kwargs):
+            return "批次垃圾"
+        text = kwargs["messages"][1]["content"]
+        if "\n" in text:
+            return text  # 整條：回英文原文 → 驗證不可用
+        return "譯" + text  # 分段：可用譯文
+
+    _patch_client(monkeypatch, handler)
+    item = bp.PrefillItem(source=src, ck=cache_key(src))
+    cache: dict[str, str] = {}
+    stats = bp.run_prefill([item], _remote_cfg(), "sys", cache)
+
+    assert stats.translated == 1
+    assert cache[item.ck] == (
+        "譯The great crushing machine awaits\n譯Feed it with cobblestone daily"
+    )
+
+
+def test_run_prefill_rescue_patchouli_ladder(monkeypatch):
+    # patchouli 項目要走 _translate_patchouli_text：$(p) 分頁各自翻譯後重組。
+    # （句中避開 _GENERIC_UNTRANSLATED_WORDS 如 "page"，假譯文才可通過驗證）
+    src = "Great crushing machine awaits$(p)Feed it with cobblestone daily"
+
+    def handler(kwargs, idx):
+        if _is_batch_call(kwargs):
+            return "批次垃圾"
+        text = kwargs["messages"][1]["content"]
+        if len(text) > 40:
+            return text  # 含兩頁的整條 → 不可用
+        return "譯" + text
+
+    _patch_client(monkeypatch, handler)
+    item = bp.PrefillItem(source=src, ck=cache_key(src), patchouli=True)
+    cache: dict[str, str] = {}
+    stats = bp.run_prefill([item], _remote_cfg(), "sys", cache)
+
+    assert stats.translated == 1
+    assert cache[item.ck] == (
+        "譯Great crushing machine awaits$(p)譯Feed it with cobblestone daily"
+    )
+
+
+def test_run_prefill_rescue_backs_off_on_429(monkeypatch):
+    state = {"rescue_calls": 0}
+
+    def handler(kwargs, idx):
+        if _is_batch_call(kwargs):
+            return "批次垃圾"
+        state["rescue_calls"] += 1
+        if state["rescue_calls"] == 1:
+            return _rate_limit_error()
+        return "譯" + kwargs["messages"][1]["content"]
+
+    _patch_client(monkeypatch, handler)
+    monkeypatch.setattr(bp.random, "uniform", lambda a, b: 1.0)
+    sleeps: list[float] = []
+    items = _mk_items(1)
+    cache: dict[str, str] = {}
+    stats = bp.run_prefill(items, _remote_cfg(remote_batch_size=4), "sys", cache,
+                           _sleep=sleeps.append)
+
+    assert stats.translated == 1 and stats.rescue_recovered == 1
+    assert cache[items[0].ck] == "譯" + items[0].source
+    assert sum(sleeps) == pytest.approx(2.0)  # 第一次退避 2.0s（已去抖動）
+
+
+def test_run_prefill_rescue_fatal_aborts(monkeypatch):
+    req = httpx.Request("POST", "http://x")
+    auth_err = AuthenticationError(
+        "bad key", response=httpx.Response(401, request=req), body=None
+    )
+
+    def handler(kwargs, idx):
+        if _is_batch_call(kwargs):
+            return "批次垃圾"
+        return auth_err
+
+    _patch_client(monkeypatch, handler)
+    with pytest.raises(TranslatorFatalError):
+        bp.run_prefill(_mk_items(1), _remote_cfg(), "sys", {})
+
+
+def test_run_prefill_rescue_cancel_stops(monkeypatch):
+    rescue_seen = threading.Event()
+
+    def handler(kwargs, idx):
+        if _is_batch_call(kwargs):
+            return "批次垃圾"
+        rescue_seen.set()
+        return "譯" + kwargs["messages"][1]["content"]
+
+    _patch_client(monkeypatch, handler)
+    cache: dict[str, str] = {}
+    stats = bp.run_prefill(
+        _mk_items(2), _remote_cfg(remote_batch_size=1, remote_concurrency=1), "sys", cache,
+        cancel_check=rescue_seen.is_set,
+    )
+    assert stats.cancelled is True
+    assert stats.translated == 0 and cache == {}
+
+
+def test_run_prefill_progress_monotonic_across_rounds(monkeypatch):
+    def handler(kwargs, idx):
+        if _is_batch_call(kwargs):
+            return "批次垃圾"
+        return "譯" + kwargs["messages"][1]["content"]
+
+    _patch_client(monkeypatch, handler)
+    progress: list[tuple[int, int]] = []
+    stats = bp.run_prefill(_mk_items(3), _remote_cfg(remote_batch_size=3), "sys", {},
+                           on_progress=lambda d, t: progress.append((d, t)))
+
+    assert stats.translated == 3
+    assert progress[0] == (0, 3)
+    dones = [d for d, _ in progress]
+    assert dones == sorted(dones)  # 單調遞增（項目只在最終落定時計數）
+    assert progress[-1] == (3, 3)
+
+
+def test_run_prefill_retry_count_reaches_rescue(monkeypatch):
+    # retry_count 重試發生在 process() 硬性 token 驗證失敗時——
+    # 第一次掉佔位符、第二次補上即成功，證明 retry_count 傳達第 3 輪
+    src = "Deliver %s ancient relics home"
+    seen: dict[str, int] = {}
+
+    def handler(kwargs, idx):
+        if _is_batch_call(kwargs):
+            return "批次垃圾"
+        text = kwargs["messages"][1]["content"]
+        seen[text] = seen.get(text, 0) + 1
+        return "掉了佔位符的譯文" if seen[text] == 1 else "譯文 {0} 在此"
+
+    _patch_client(monkeypatch, handler)
+    item = bp.PrefillItem(source=src, ck=cache_key(src))
+    cache: dict[str, str] = {}
+    stats = bp.run_prefill([item], _remote_cfg(), "sys", cache, retry_count=1)
+
+    assert stats.translated == 1
+    assert cache[item.ck] == "譯文 %s 在此"
+    # 同一條字串恰被請求兩次（第一次 process 失敗 → retry_count 補一次）
+    assert list(seen.values()) == [2]
+
+
+def test_prefill_wrapper_passes_retry_count(monkeypatch, tmp_path):
+    captured: dict = {}
+
+    def fake_run_prefill(items, cfg, system_prompt, cache, **kwargs):
+        captured.update(kwargs)
+        return bp.PrefillStats(total_items=len(items))
+
+    monkeypatch.setattr(bp, "run_prefill", fake_run_prefill)
+    target = _kubejs_target(tmp_path, {"quest.a.desc": "Chase the golden rabbit"})
+    bp.prefill_translation_cache([target], _remote_cfg(), "sys", "zh_tw", {}, retry_count=3)
+    assert captured["retry_count"] == 3
+
+
+def test_run_prefill_hints_low_concurrency_for_large_jobs(monkeypatch):
+    # GUI QSettings 會保留舊預設 6——大量待翻時提示使用者可調高併發
+    _patch_client(monkeypatch, _echo_handler)
+    monkeypatch.setattr(bp, "_CONCURRENCY_HINT_MIN_ITEMS", 0)
+    logs: list[str] = []
+    bp.run_prefill(_mk_items(2), _remote_cfg(remote_concurrency=4), "sys", {},
+                   on_log=logs.append)
+    assert any("提示" in line and "併發" in line for line in logs)
+
+
+def test_run_prefill_no_hint_when_concurrency_raised(monkeypatch):
+    _patch_client(monkeypatch, _echo_handler)
+    monkeypatch.setattr(bp, "_CONCURRENCY_HINT_MIN_ITEMS", 0)
+    logs: list[str] = []
+    bp.run_prefill(_mk_items(2), _remote_cfg(remote_concurrency=16), "sys", {},
+                   on_log=logs.append)
+    assert not any("提示" in line for line in logs)
+
+
 # ---------------------------------------------------------------- 入口包裝
 
 def test_prefill_wrapper_noop_for_local_backend(monkeypatch, tmp_path):
@@ -509,4 +781,4 @@ def test_prefill_wrapper_end_to_end(monkeypatch, tmp_path):
     assert stats.translated == 1
     assert cache[cache_key(src)] == "譯" + src
     assert len(calls) == 1
-    assert any("批次預翻譯完成" in line for line in logs)
+    assert any("批次預翻譯完成" in line and "耗時" in line for line in logs)

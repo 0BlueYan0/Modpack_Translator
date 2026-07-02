@@ -44,6 +44,8 @@ class RemoteTranslator:
         self._client = OpenAI(
             base_url=f"{normalize_base_url(base_url)}/v1",
             api_key=api_key or "not-needed",
+            timeout=cfg.remote_timeout_s,
+            max_retries=0,  # 重試由分段重試階梯管理，不疊 SDK 隱性重試
         )
 
     def translate(self, text: str, cancel_check: Callable[[], bool] | None = None) -> str:

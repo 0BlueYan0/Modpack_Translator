@@ -1,9 +1,11 @@
-"""遠端批次預翻譯：把所有待翻字串去重後批次併發翻進快取。
+"""遠端批次預翻譯：把所有待翻字串去重後批次併發翻進快取，三輪收斂。
 
 僅 backend_mode="remote" 時啟用。在既有逐檔迴圈之前執行：
-收集所有目標檔的待翻字串 → 跨檔去重 → 每請求 N 條、M 條併發翻譯 →
-成功者寫入共用快取。之後逐檔流程幾乎全是快取命中；預翻譯失敗的字串
-自然回退到既有的逐條分段重試階梯（translate_dict / _process_patchouli）。
+第 1 輪：收集所有目標檔的待翻字串 → 跨檔去重 → 每請求 N 條、M 條併發批次翻譯；
+第 2 輪：整批失敗（>1 條的批）的項目以半批大小重新組批重試；
+第 3 輪：仍失敗者（含單條批）沿用主迴圈的逐條分段重試階梯，一條一個任務併發救援。
+成功者寫入共用快取，之後逐檔流程幾乎全是快取命中；三輪後仍失敗的極少數字串
+自然回退到既有的逐條序列路徑（translate_dict / _process_patchouli）。
 
 執行緒模型：worker threads 只做「請求 + 解析 + 驗證」並回傳結果，
 協調者執行緒（呼叫端）收結果、寫快取、發進度——共享可變狀態只有
@@ -46,6 +48,8 @@ from modpack_translator.pipeline.remote_translator import resolve_remote_setting
 from modpack_translator.pipeline.runner import (
     _HAS_LETTER_RE,
     _static_translation,
+    _translate_patchouli_text,
+    _translate_segmented_text,
     cache_key,
     read_existing_target,
     read_target_strings,
@@ -56,6 +60,8 @@ from modpack_translator.pipeline.scanner import TranslationTarget
 _BATCH_CHAR_BUDGET = 4000
 # 每累積多少條成功翻譯就呼叫一次 flush_cache
 _FLUSH_EVERY = 200
+# 待翻條數超過此值且併發 <= 6（舊預設，QSettings 可能殘留）時提示可調高
+_CONCURRENCY_HINT_MIN_ITEMS = 500
 # 批次模式附加在既有 system prompt 之後的指令
 _BATCH_SUFFIX = (
     "\n\n[Batch mode]\n"
@@ -74,16 +80,22 @@ _PLACEHOLDER_RE = re.compile(r"\{[0-9]+\}")
 class PrefillItem:
     source: str  # 原始來源字串
     ck: str      # runner.cache_key(source)
+    patchouli: bool = False  # 逐條救援時是否走 _translate_patchouli_text 階梯
 
 
 @dataclass
 class PrefillStats:
     total_items: int = 0
-    translated: int = 0
-    failed: int = 0
-    batches_sent: int = 0
+    translated: int = 0            # 三輪成功總和
+    failed: int = 0                # 三輪後仍失敗（回退逐檔序列路徑）
+    batches_sent: int = 0          # 第 1+2 輪送出的批次數
     batches_unparseable: int = 0
     cancelled: bool = False
+    round1_failed: int = 0         # 第 1 輪結束時未成功的條數
+    round2_items: int = 0          # 進入第 2 輪（縮小批次重試）的條數
+    round2_recovered: int = 0
+    rescue_items: int = 0          # 進入第 3 輪（逐條救援）的條數
+    rescue_recovered: int = 0
 
 
 @dataclass
@@ -133,7 +145,10 @@ def collect_prefill_items(
             if not _HAS_LETTER_RE.search(_PLACEHOLDER_RE.sub("", encoded)):
                 continue
             seen.add(ck)
-            items.append(PrefillItem(source=src, ck=ck))
+            items.append(PrefillItem(
+                source=src, ck=ck,
+                patchouli=target.format == "patchouli_json",
+            ))
     return items
 
 
@@ -257,22 +272,20 @@ def _interruptible_sleep(
     return not cancel_event.is_set()
 
 
-def _request_batch_raw(
+def _stream_with_backoff(
     client: OpenAI,
     cfg: ModelConfig,
     model: str,
-    system_prompt: str,
-    batch: list[_EncodedItem],
+    messages: list[dict],
     max_tokens: int,
     cancel_event: threading.Event,
     _sleep: Callable[[float], None],
 ) -> str | None:
-    """送一次批次請求，含逾時/429/5xx 的指數退避重試。
+    """送一次串流 chat completion，含逾時/429/5xx 的指數退避重試。
 
-    取消或重試耗盡回 None。致命錯誤（金鑰/權限/找不到模型/連線失敗）
-    轉拋 TranslatorFatalError 讓整輪中止。
+    批次請求與逐條搶救共用。取消或重試耗盡回 None。致命錯誤
+    （金鑰/權限/找不到模型/連線失敗）轉拋 TranslatorFatalError 讓整輪中止。
     """
-    user_message = _build_user_message(batch)
     for attempt in range(cfg.remote_backoff_retries + 1):
         if cancel_event.is_set():
             return None
@@ -280,10 +293,7 @@ def _request_batch_raw(
         try:
             stream = client.chat.completions.create(
                 model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt + _BATCH_SUFFIX},
-                    {"role": "user", "content": user_message},
-                ],
+                messages=messages,
                 max_tokens=max_tokens,
                 temperature=cfg.temperature,
                 stream=True,
@@ -320,6 +330,24 @@ def _request_batch_raw(
         if not _interruptible_sleep(delay, cancel_event, _sleep):
             return None
     return None
+
+
+def _request_batch_raw(
+    client: OpenAI,
+    cfg: ModelConfig,
+    model: str,
+    system_prompt: str,
+    batch: list[_EncodedItem],
+    max_tokens: int,
+    cancel_event: threading.Event,
+    _sleep: Callable[[float], None],
+) -> str | None:
+    """組批次 messages 後委派給 _stream_with_backoff。回傳語意同該函式。"""
+    messages = [
+        {"role": "system", "content": system_prompt + _BATCH_SUFFIX},
+        {"role": "user", "content": _build_user_message(batch)},
+    ]
+    return _stream_with_backoff(client, cfg, model, messages, max_tokens, cancel_event, _sleep)
 
 
 def _process_batch(
@@ -368,19 +396,199 @@ def _process_batch(
         )
 
 
+class _RescueTranslator:
+    """逐條救援用 translator：請求形狀與 RemoteTranslator.translate 相同
+    （純 system prompt、無批次後綴、max_tokens=cfg.max_tokens），
+    但套用批次層的退避重試。無可變狀態，多執行緒可共用。
+    請求耗盡/4xx/取消時回空字串，讓後處理驗證安全判失敗。"""
+
+    def __init__(
+        self,
+        client: OpenAI,
+        cfg: ModelConfig,
+        model: str,
+        system_prompt: str,
+        cancel_event: threading.Event,
+        _sleep: Callable[[float], None],
+    ) -> None:
+        self._client = client
+        self._cfg = cfg
+        self._model = model
+        self._system_prompt = system_prompt
+        self._cancel_event = cancel_event
+        self._sleep = _sleep
+
+    def translate(self, text: str, cancel_check: Callable[[], bool] | None = None) -> str:
+        raw = _stream_with_backoff(
+            self._client,
+            self._cfg,
+            self._model,
+            [
+                {"role": "system", "content": self._system_prompt},
+                {"role": "user", "content": text},
+            ],
+            self._cfg.max_tokens,
+            self._cancel_event,
+            self._sleep,
+        )
+        return raw or ""
+
+
+def _rescue_item(
+    translator: _RescueTranslator,
+    item: PrefillItem,
+    retry_count: int,
+    cancel_event: threading.Event,
+) -> tuple[PrefillItem, str | None]:
+    """worker thread 進入點：以主迴圈的分段重試階梯翻譯單條字串。"""
+    try:
+        fn = _translate_patchouli_text if item.patchouli else _translate_segmented_text
+        final, ok = fn(translator, item.source, retry_count, cancel_check=cancel_event.is_set)
+        return item, (final if ok else None)
+    except TranslatorFatalError:
+        raise
+    except Exception:  # noqa: BLE001 — 單條意外失敗不可拖垮整輪
+        return item, None
+
+
+@dataclass
+class _RunContext:
+    """協調者狀態。除 cancel_event 外只有協調者執行緒讀寫，維持無鎖模型。"""
+
+    client: OpenAI
+    cfg: ModelConfig
+    model: str
+    system_prompt: str
+    cache: dict[str, str]
+    stats: PrefillStats
+    total: int
+    cancel_event: threading.Event
+    cancel_check: Callable[[], bool] | None
+    on_progress: Callable[[int, int], None] | None
+    on_log: Callable[[str], None] | None
+    flush_cache: Callable[[], None] | None
+    sleep: Callable[[float], None]
+    resolved: int = 0
+    since_flush: int = 0
+    errors_logged: int = 0
+
+
+def _check_cancelled(ctx: _RunContext) -> bool:
+    if ctx.cancel_check is not None and ctx.cancel_check():
+        ctx.cancel_event.set()
+        ctx.stats.cancelled = True
+        return True
+    return False
+
+
+def _settle(ctx: _RunContext, item: PrefillItem, final: str | None) -> None:
+    """一條字串最終落定：成功寫快取、失敗計數，並依累積量 flush。"""
+    ctx.resolved += 1
+    if final is not None:
+        ctx.cache[item.ck] = final
+        ctx.stats.translated += 1
+        ctx.since_flush += 1
+    else:
+        ctx.stats.failed += 1
+    if ctx.flush_cache is not None and ctx.since_flush >= _FLUSH_EVERY:
+        ctx.flush_cache()
+        ctx.since_flush = 0
+
+
+def _emit_progress(ctx: _RunContext) -> None:
+    if ctx.on_progress is not None:
+        ctx.on_progress(ctx.resolved, ctx.total)
+
+
+def _run_batches(
+    pool: ThreadPoolExecutor,
+    ctx: _RunContext,
+    batches: list[list[_EncodedItem]],
+) -> tuple[list[PrefillItem], list[PrefillItem]]:
+    """跑一輪批次請求，回傳 (多條批的失敗項, 單條批的失敗項)。
+
+    單條批重送同樣的請求幾乎必然重蹈覆轍，分流出來直接進逐條救援。
+    取消時提前返回（未收割的項目不落定、不計數）。
+    """
+    futures = [
+        pool.submit(
+            _process_batch, ctx.client, ctx.cfg, ctx.model, ctx.system_prompt,
+            batch, ctx.cancel_event, ctx.sleep,
+        )
+        for batch in batches
+    ]
+    failed_multi: list[PrefillItem] = []
+    failed_single: list[PrefillItem] = []
+    for fut in as_completed(futures):
+        if _check_cancelled(ctx):
+            break
+        try:
+            result = fut.result()
+        except TranslatorFatalError:
+            ctx.cancel_event.set()
+            raise
+        ctx.stats.batches_sent += 1
+        if result.unparseable:
+            ctx.stats.batches_unparseable += 1
+        if result.error is not None and ctx.on_log is not None and ctx.errors_logged < 5:
+            ctx.on_log(f"[警告] 一批預翻譯失敗（將進入下一輪重試）：{result.error}")
+            ctx.errors_logged += 1
+        sink = failed_single if len(result.results) == 1 else failed_multi
+        for enc, final in result.results:
+            if final is not None:
+                _settle(ctx, enc.item, final)
+            else:
+                sink.append(enc.item)
+        _emit_progress(ctx)
+    return failed_multi, failed_single
+
+
+def _run_rescue_round(
+    pool: ThreadPoolExecutor,
+    ctx: _RunContext,
+    items: list[PrefillItem],
+    retry_count: int,
+) -> None:
+    """第 3 輪：逐條併發救援，結果直接最終落定（成功寫快取／失敗計 failed）。"""
+    translator = _RescueTranslator(
+        ctx.client, ctx.cfg, ctx.model, ctx.system_prompt, ctx.cancel_event, ctx.sleep,
+    )
+    futures = [
+        pool.submit(_rescue_item, translator, item, retry_count, ctx.cancel_event)
+        for item in items
+    ]
+    for fut in as_completed(futures):
+        if _check_cancelled(ctx):
+            break
+        try:
+            item, final = fut.result()
+        except TranslatorFatalError:
+            ctx.cancel_event.set()
+            raise
+        if final is not None:
+            ctx.stats.rescue_recovered += 1
+        _settle(ctx, item, final)
+        _emit_progress(ctx)
+
+
 def run_prefill(
     items: list[PrefillItem],
     cfg: ModelConfig,
     system_prompt: str,
     cache: dict[str, str],
     *,
+    retry_count: int = 0,
     cancel_check: Callable[[], bool] | None = None,
     on_progress: Callable[[int, int], None] | None = None,  # (done, total)
     on_log: Callable[[str], None] | None = None,
     flush_cache: Callable[[], None] | None = None,
     _sleep: Callable[[float], None] = time.sleep,
 ) -> PrefillStats:
-    """批次併發翻譯 items，成功者寫入 cache（僅協調者執行緒寫入）。"""
+    """三輪收斂翻譯 items：批次 → 縮小批次重試 → 併發逐條救援。
+
+    成功者寫入 cache（僅協調者執行緒寫入）。retry_count 傳給第 3 輪的
+    分段重試階梯，與主迴圈語意一致。
+    """
     stats = PrefillStats(total_items=len(items))
     if not items:
         return stats
@@ -390,7 +598,7 @@ def run_prefill(
         base_url=f"{normalize_base_url(base_url)}/v1",
         api_key=api_key or "not-needed",
         timeout=cfg.remote_timeout_s,
-        max_retries=0,  # 退避重試自己管理（_request_batch_raw）
+        max_retries=0,  # 退避重試自己管理（_stream_with_backoff）
     )
     batches = _build_batches(items, cfg.remote_batch_size)
     if on_log is not None:
@@ -398,52 +606,57 @@ def run_prefill(
             f"批次預翻譯：{len(items)} 條待翻字串（去重後），"
             f"分 {len(batches)} 批、併發 {cfg.remote_concurrency}。"
         )
+        if cfg.remote_concurrency <= 6 and len(items) > _CONCURRENCY_HINT_MIN_ITEMS:
+            on_log(
+                f"提示：目前併發僅 {cfg.remote_concurrency}，付費 API 可在設定中"
+                "調高併發請求數以加速（429 會自動退避，安全）。"
+            )
     if on_progress is not None:
         on_progress(0, len(items))
 
-    cancel_event = threading.Event()
-    done = 0
-    since_flush = 0
-    errors_logged = 0
+    ctx = _RunContext(
+        client=client, cfg=cfg, model=model, system_prompt=system_prompt,
+        cache=cache, stats=stats, total=len(items),
+        cancel_event=threading.Event(), cancel_check=cancel_check,
+        on_progress=on_progress, on_log=on_log, flush_cache=flush_cache,
+        sleep=_sleep,
+    )
     pool = ThreadPoolExecutor(max_workers=cfg.remote_concurrency)
     try:
-        futures = [
-            pool.submit(
-                _process_batch, client, cfg, model, system_prompt, batch, cancel_event, _sleep
+        failed_multi, failed_single = _run_batches(pool, ctx, batches)
+        stats.round1_failed = len(failed_multi) + len(failed_single)
+        if not stats.cancelled and stats.round1_failed and on_log is not None:
+            on_log(
+                f"第 1 輪剩 {stats.round1_failed} 條未成功："
+                f"{len(failed_multi)} 條縮小批次重試、{len(failed_single)} 條待逐條救援。"
             )
-            for batch in batches
-        ]
-        for fut in as_completed(futures):
-            if cancel_check is not None and cancel_check():
-                cancel_event.set()
-                stats.cancelled = True
-                break
-            try:
-                result = fut.result()
-            except TranslatorFatalError:
-                cancel_event.set()
-                raise
-            stats.batches_sent += 1
-            if result.unparseable:
-                stats.batches_unparseable += 1
-            if result.error is not None and on_log is not None and errors_logged < 5:
-                on_log(f"[警告] 一批預翻譯失敗（將回退逐條重試）：{result.error}")
-                errors_logged += 1
-            for enc, final in result.results:
-                done += 1
-                if final is not None:
-                    cache[enc.item.ck] = final
-                    stats.translated += 1
-                    since_flush += 1
-                else:
-                    stats.failed += 1
-            if on_progress is not None:
-                on_progress(done, len(items))
-            if flush_cache is not None and since_flush >= _FLUSH_EVERY:
-                flush_cache()
-                since_flush = 0
+
+        if not stats.cancelled and failed_multi:
+            half = max(1, cfg.remote_batch_size // 2)
+            stats.round2_items = len(failed_multi)
+            if on_log is not None:
+                on_log(f"第 2 輪：以每批 {half} 條重試 {len(failed_multi)} 條…")
+            before = stats.translated
+            f2_multi, f2_single = _run_batches(
+                pool, ctx, _build_batches(failed_multi, half)
+            )
+            stats.round2_recovered = stats.translated - before
+            failed_single += f2_multi + f2_single
+            if not stats.cancelled and on_log is not None:
+                on_log(f"第 2 輪完成：救回 {stats.round2_recovered} 條。")
+
+        if not stats.cancelled and failed_single:
+            stats.rescue_items = len(failed_single)
+            if on_log is not None:
+                on_log(
+                    f"第 3 輪：逐條並行救援 {stats.rescue_items} 條"
+                    f"（沿用分段重試階梯、併發 {cfg.remote_concurrency}）…"
+                )
+            _run_rescue_round(pool, ctx, failed_single, retry_count)
+            if not stats.cancelled and on_log is not None:
+                on_log(f"第 3 輪完成：救回 {stats.rescue_recovered} 條。")
     finally:
-        # 取消/致命錯誤：丟棄佇列中的批次；在途請求由 cancel_event 在下個 chunk 中止
+        # 取消/致命錯誤：丟棄佇列中的任務；在途請求由 cancel_event 在下個 chunk 中止
         pool.shutdown(wait=False, cancel_futures=True)
     return stats
 
@@ -455,6 +668,7 @@ def prefill_translation_cache(
     lang_code: str,
     cache: dict[str, str],
     *,
+    retry_count: int = 0,
     cancel_check: Callable[[], bool] | None = None,
     on_progress: Callable[[int, int], None] | None = None,
     on_log: Callable[[str], None] | None = None,
@@ -469,23 +683,31 @@ def prefill_translation_cache(
         if on_log is not None:
             on_log("批次預翻譯：沒有需要預翻譯的字串（快取已涵蓋）。")
         return PrefillStats()
+    start = time.monotonic()
     stats = run_prefill(
         items,
         cfg,
         system_prompt,
         cache,
+        retry_count=retry_count,
         cancel_check=cancel_check,
         on_progress=on_progress,
         on_log=on_log,
         flush_cache=flush_cache,
         _sleep=_sleep,
     )
+    elapsed = time.monotonic() - start
     if on_log is not None:
         if stats.cancelled:
             on_log(f"批次預翻譯已取消（已完成 {stats.translated} 條）。")
         else:
+            rate = (
+                f"（{stats.translated / elapsed:.1f} 條/秒）"
+                if elapsed > 0 and stats.translated else ""
+            )
             on_log(
                 f"批次預翻譯完成：成功 {stats.translated} 條、"
-                f"待逐條重試 {stats.failed} 條。開始逐檔寫入…"
+                f"待逐條重試 {stats.failed} 條，耗時 {elapsed:.1f} 秒{rate}。"
+                "開始逐檔寫入…"
             )
     return stats
