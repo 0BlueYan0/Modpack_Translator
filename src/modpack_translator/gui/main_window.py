@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -34,6 +35,7 @@ _APP_ICON_PATH = _PROJECT_ROOT / "assets" / "icon" / "app_icon.png"
 
 from modpack_translator.config import load_config
 from modpack_translator.gui.theme import apply_theme, eye_icon, restyle
+from modpack_translator.pipeline.glossary import available_glossaries
 from modpack_translator.gui.worker import ScanWorker, TranslateWorker
 from modpack_translator.gui.stats import build_stats_text
 from modpack_translator.version import APP_NAME, APP_VERSION, __version__
@@ -426,8 +428,30 @@ class MainWindow(QMainWindow):
         retry_row.addWidget(retry_help)
         retry_row.addStretch()
 
+        glossary_row = QHBoxLayout()
+        self.glossary_combo = QComboBox()
+        self.glossary_combo.setFixedWidth(120)
+        lang_code = self._cfg.language.code if self._cfg else "zh_tw"
+        for version, path in available_glossaries(lang_code):
+            self.glossary_combo.addItem(version, str(path))
+        self.glossary_combo.addItem("停用", "off")
+        self.glossary_combo.setCurrentIndex(0)  # 預設最新版（無任何版本檔時即「停用」）
+        self.glossary_combo.currentIndexChanged.connect(self._save_remote_settings)
+        glossary_help = _make_help_label(
+            "把 Minecraft 官方繁中譯名（地獄、界伏蚌、終界…）注入翻譯提示，\n"
+            "讓譯文用語與官方一致；整串正好是官方詞彙時直接套用官方譯名，\n"
+            "不呼叫模型（省時省費用）。版本對應官方語言檔的 Minecraft 版本。\n"
+            "既有快取的舊譯文不受影響；要讓用語庫對舊譯文生效，\n"
+            "請手動刪除 outputs/translation_cache.json 後重新翻譯（會重新計費）。"
+        )
+        glossary_row.addWidget(QLabel("官方用語庫："))
+        glossary_row.addWidget(self.glossary_combo)
+        glossary_row.addWidget(glossary_help)
+        glossary_row.addStretch()
+
         opt_vbox.addLayout(checkbox_row)
         opt_vbox.addLayout(retry_row)
+        opt_vbox.addLayout(glossary_row)
 
         root_layout.addWidget(options_group)
 
@@ -542,6 +566,7 @@ class MainWindow(QMainWindow):
         mode = self._settings.value("model/backend_mode", "local") or "local"
         conc = _to_int(self._settings.value("model/remote_concurrency"), 16)
         batch = _to_int(self._settings.value("model/remote_batch_size"), 12)
+        glossary_version = self._settings.value("options/glossary_version", "") or ""
 
         self._loading_settings = True
         try:
@@ -550,6 +575,11 @@ class MainWindow(QMainWindow):
             self.remote_model_edit.setText(model)
             self.remote_conc_spin.setValue(conc)
             self.remote_batch_spin.setValue(batch)
+            if glossary_version:
+                # 找不到已儲存的版本（如檔案被移除）時保持預設（最新版）
+                idx = self.glossary_combo.findText(glossary_version)
+                if idx >= 0:
+                    self.glossary_combo.setCurrentIndex(idx)
             if mode == "remote":
                 self.backend_remote_radio.setChecked(True)
             else:
@@ -568,6 +598,7 @@ class MainWindow(QMainWindow):
         self._settings.setValue("model/remote_model", self.remote_model_edit.text().strip())
         self._settings.setValue("model/remote_concurrency", int(self.remote_conc_spin.value()))
         self._settings.setValue("model/remote_batch_size", int(self.remote_batch_spin.value()))
+        self._settings.setValue("options/glossary_version", self.glossary_combo.currentText())
 
     def _on_test_connection(self):
         base = self.remote_url_edit.text().strip()
@@ -803,6 +834,12 @@ class MainWindow(QMainWindow):
             cfg.model.remote_batch_size = self.remote_batch_spin.value()
         else:
             cfg.model.backend_mode = "local"
+
+        # 官方用語庫：依下拉選擇覆寫 yaml 預設（停用 → None）
+        glossary_data = self.glossary_combo.currentData()
+        cfg.language.glossary_path = (
+            glossary_data if glossary_data and glossary_data != "off" else None
+        )
         cfg.paths.create_output_dirs()
         return cfg
 

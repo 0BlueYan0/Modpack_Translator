@@ -38,6 +38,11 @@ from modpack_translator.pipeline._chat import (
     describe_openai_error,
     normalize_base_url,
 )
+from modpack_translator.pipeline.glossary import (
+    _BATCH_TERM_CAP,
+    Glossary,
+    augment_prompt,
+)
 from modpack_translator.pipeline.postprocessor import process
 from modpack_translator.pipeline.preprocessor import (
     diff_keys,
@@ -116,6 +121,7 @@ def collect_prefill_items(
     targets: list[TranslationTarget],
     lang_code: str,
     cache: dict[str, str],
+    glossary: Glossary | None = None,
 ) -> list[PrefillItem]:
     """收集所有目標檔中「確定會送 API」的待翻字串，以來源雜湊去重。
 
@@ -141,6 +147,10 @@ def collect_prefill_items(
             static = _static_translation(src)
             if static is not None and is_usable_translation(src, static):
                 continue
+            if glossary is not None:
+                official = glossary.exact_match(src)
+                if official is not None and is_usable_translation(src, official):
+                    continue  # 逐檔迴圈經 runner 的短路 hook 免 LLM 解決
             encoded, _tokens = encode(src)
             if not _HAS_LETTER_RE.search(_PLACEHOLDER_RE.sub("", encoded)):
                 continue
@@ -341,10 +351,11 @@ def _request_batch_raw(
     max_tokens: int,
     cancel_event: threading.Event,
     _sleep: Callable[[float], None],
+    glossary_block: str = "",
 ) -> str | None:
     """組批次 messages 後委派給 _stream_with_backoff。回傳語意同該函式。"""
     messages = [
-        {"role": "system", "content": system_prompt + _BATCH_SUFFIX},
+        {"role": "system", "content": system_prompt + _BATCH_SUFFIX + glossary_block},
         {"role": "user", "content": _build_user_message(batch)},
     ]
     return _stream_with_backoff(client, cfg, model, messages, max_tokens, cancel_event, _sleep)
@@ -358,15 +369,20 @@ def _process_batch(
     batch: list[_EncodedItem],
     cancel_event: threading.Event,
     _sleep: Callable[[float], None],
+    glossary: Glossary | None = None,
 ) -> _BatchResult:
     """worker thread 進入點：請求 → 解析（不可解析時重送一次）→ 逐條驗證。"""
     try:
         max_tokens = _batch_max_tokens(batch)
+        glossary_block = "" if glossary is None else glossary.format_block(
+            glossary.match_terms(enc.encoded for enc in batch), cap=_BATCH_TERM_CAP
+        )
         mapping: dict[int, str] = {}
         unparseable = False
         for _parse_attempt in (0, 1):
             raw = _request_batch_raw(
-                client, cfg, model, system_prompt, batch, max_tokens, cancel_event, _sleep
+                client, cfg, model, system_prompt, batch, max_tokens, cancel_event, _sleep,
+                glossary_block,
             )
             if raw is None:
                 break  # 取消或請求層重試耗盡：不再做解析重試
@@ -410,6 +426,7 @@ class _RescueTranslator:
         system_prompt: str,
         cancel_event: threading.Event,
         _sleep: Callable[[float], None],
+        glossary: Glossary | None = None,
     ) -> None:
         self._client = client
         self._cfg = cfg
@@ -417,6 +434,7 @@ class _RescueTranslator:
         self._system_prompt = system_prompt
         self._cancel_event = cancel_event
         self._sleep = _sleep
+        self.glossary = glossary  # public：runner 的短路 hook 以 getattr 取用
 
     def translate(self, text: str, cancel_check: Callable[[], bool] | None = None) -> str:
         raw = _stream_with_backoff(
@@ -424,7 +442,7 @@ class _RescueTranslator:
             self._cfg,
             self._model,
             [
-                {"role": "system", "content": self._system_prompt},
+                {"role": "system", "content": augment_prompt(self._system_prompt, self.glossary, [text])},
                 {"role": "user", "content": text},
             ],
             self._cfg.max_tokens,
@@ -468,6 +486,7 @@ class _RunContext:
     on_log: Callable[[str], None] | None
     flush_cache: Callable[[], None] | None
     sleep: Callable[[float], None]
+    glossary: Glossary | None = None
     resolved: int = 0
     since_flush: int = 0
     errors_logged: int = 0
@@ -513,7 +532,7 @@ def _run_batches(
     futures = [
         pool.submit(
             _process_batch, ctx.client, ctx.cfg, ctx.model, ctx.system_prompt,
-            batch, ctx.cancel_event, ctx.sleep,
+            batch, ctx.cancel_event, ctx.sleep, ctx.glossary,
         )
         for batch in batches
     ]
@@ -552,6 +571,7 @@ def _run_rescue_round(
     """第 3 輪：逐條併發救援，結果直接最終落定（成功寫快取／失敗計 failed）。"""
     translator = _RescueTranslator(
         ctx.client, ctx.cfg, ctx.model, ctx.system_prompt, ctx.cancel_event, ctx.sleep,
+        ctx.glossary,
     )
     futures = [
         pool.submit(_rescue_item, translator, item, retry_count, ctx.cancel_event)
@@ -582,6 +602,7 @@ def run_prefill(
     on_progress: Callable[[int, int], None] | None = None,  # (done, total)
     on_log: Callable[[str], None] | None = None,
     flush_cache: Callable[[], None] | None = None,
+    glossary: Glossary | None = None,
     _sleep: Callable[[float], None] = time.sleep,
 ) -> PrefillStats:
     """三輪收斂翻譯 items：批次 → 縮小批次重試 → 併發逐條救援。
@@ -619,7 +640,7 @@ def run_prefill(
         cache=cache, stats=stats, total=len(items),
         cancel_event=threading.Event(), cancel_check=cancel_check,
         on_progress=on_progress, on_log=on_log, flush_cache=flush_cache,
-        sleep=_sleep,
+        sleep=_sleep, glossary=glossary,
     )
     pool = ThreadPoolExecutor(max_workers=cfg.remote_concurrency)
     try:
@@ -673,12 +694,13 @@ def prefill_translation_cache(
     on_progress: Callable[[int, int], None] | None = None,
     on_log: Callable[[str], None] | None = None,
     flush_cache: Callable[[], None] | None = None,
+    glossary: Glossary | None = None,
     _sleep: Callable[[float], None] = time.sleep,
 ) -> PrefillStats:
     """GUI 與 CLI 共用的入口：remote 模式且開關開啟才收集並執行預翻譯。"""
     if cfg.backend_mode != "remote" or not cfg.remote_prefill:
         return PrefillStats()
-    items = collect_prefill_items(targets, lang_code, cache)
+    items = collect_prefill_items(targets, lang_code, cache, glossary)
     if not items:
         if on_log is not None:
             on_log("批次預翻譯：沒有需要預翻譯的字串（快取已涵蓋）。")
@@ -694,6 +716,7 @@ def prefill_translation_cache(
         on_progress=on_progress,
         on_log=on_log,
         flush_cache=flush_cache,
+        glossary=glossary,
         _sleep=_sleep,
     )
     elapsed = time.monotonic() - start

@@ -14,6 +14,7 @@ from openai import (
 import modpack_translator.pipeline.batch_prefill as bp
 from modpack_translator.config import ModelConfig
 from modpack_translator.pipeline._chat import TranslatorFatalError
+from modpack_translator.pipeline.glossary import Glossary
 from modpack_translator.pipeline.runner import cache_key, translate_dict
 from modpack_translator.pipeline.scanner import TranslationTarget
 
@@ -782,3 +783,76 @@ def test_prefill_wrapper_end_to_end(monkeypatch, tmp_path):
     assert cache[cache_key(src)] == "譯" + src
     assert len(calls) == 1
     assert any("批次預翻譯完成" in line and "耗時" in line for line in logs)
+
+
+# ---------------------------------------------------------------- 官方用語庫
+
+def test_run_prefill_batch_glossary_block_scoped_per_batch(monkeypatch):
+    calls = _patch_client(monkeypatch, _echo_handler)
+    g = Glossary({"Nether": "地獄", "Shulker Box": "界伏盒"})
+    with_term = "Go to the Nether and return safely"
+    without_term = "Collect many shiny stones for the mason"
+    items = [
+        bp.PrefillItem(source=with_term, ck=cache_key(with_term)),
+        bp.PrefillItem(source=without_term, ck=cache_key(without_term)),
+    ]
+    cfg = _remote_cfg(remote_batch_size=1)  # 每批一條 → 各批只含自己命中的詞
+    stats = bp.run_prefill(items, cfg, "sys", {}, glossary=g)
+    assert stats.translated == 2
+
+    batch_calls = [kw for kw in calls if _is_batch_call(kw)]
+    assert len(batch_calls) == 2
+    for kw in batch_calls:
+        system = kw["messages"][0]["content"]
+        if "Nether" in kw["messages"][1]["content"]:
+            # 區塊接在批次後綴之後，且只含該批命中的詞
+            assert system.index("[Batch mode]") < system.index("[Glossary]")
+            assert "Nether = 地獄" in system
+            assert "Shulker Box" not in system
+        else:
+            assert "[Glossary]" not in system
+
+
+def test_run_prefill_no_glossary_leaves_prompt_untouched(monkeypatch):
+    calls = _patch_client(monkeypatch, _echo_handler)
+    bp.run_prefill(_mk_items(1), _remote_cfg(), "sys", {})
+    assert "[Glossary]" not in calls[0]["messages"][0]["content"]
+
+
+def test_run_prefill_rescue_carries_glossary(monkeypatch):
+    # 批次輪全垃圾 → 單條批直進逐條救援；救援請求需帶 glossary 區塊
+    def handler(kwargs, idx):
+        if _is_batch_call(kwargs):
+            return "批次全垃圾"
+        return "去地獄然後平安歸來"
+
+    calls = _patch_client(monkeypatch, handler)
+    g = Glossary({"Nether": "地獄"})
+    src = "Go to the Nether and return safely"
+    item = bp.PrefillItem(source=src, ck=cache_key(src))
+    cache: dict[str, str] = {}
+    stats = bp.run_prefill([item], _remote_cfg(remote_batch_size=8), "sys", cache, glossary=g)
+
+    assert stats.rescue_recovered == 1
+    assert cache[item.ck] == "去地獄然後平安歸來"
+    rescue_calls = [kw for kw in calls if not _is_batch_call(kw)]
+    assert rescue_calls
+    system = rescue_calls[0]["messages"][0]["content"]
+    assert system.startswith("sys\n\n[Glossary]")
+    assert "Nether = 地獄" in system
+
+
+def test_collect_skips_exact_glossary_match(tmp_path):
+    g = Glossary({"Nether Star": "地獄之星"})
+    target = _kubejs_target(tmp_path, {
+        "item.a.name": "Nether Star",                       # 整串命中 → 跳過（runner 短路處理）
+        "quest.b.desc": "Bring the Nether Star to the altar",  # 非整串 → 照收
+    })
+    items = bp.collect_prefill_items([target], "zh_tw", {}, g)
+    assert [i.source for i in items] == ["Bring the Nether Star to the altar"]
+
+
+def test_collect_without_glossary_keeps_exact_term_items(tmp_path):
+    target = _kubejs_target(tmp_path, {"item.a.name": "Nether Star"})
+    items = bp.collect_prefill_items([target], "zh_tw", {})
+    assert [i.source for i in items] == ["Nether Star"]

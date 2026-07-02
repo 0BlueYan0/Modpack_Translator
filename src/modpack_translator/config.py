@@ -83,6 +83,8 @@ class LanguageConfig(BaseModel):
     code: str
     display_name: str
     system_prompt: str
+    # 官方用語庫對照表路徑（相對專案根）；None/空字串＝停用
+    glossary_path: str | None = None
 
 
 class AppConfig(BaseModel):

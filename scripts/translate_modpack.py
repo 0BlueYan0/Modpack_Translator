@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from modpack_translator.config import load_config
 from modpack_translator.pipeline.batch_prefill import prefill_translation_cache
+from modpack_translator.pipeline.glossary import load_glossary
 from modpack_translator.pipeline.patcher import (
     backup_mods,
     backup_quest_configs,
@@ -76,6 +77,17 @@ def parse_args():
         "--no-prefill",
         action="store_true",
         help="停用遠端批次預翻譯（回到逐條序列翻譯）",
+    )
+    p.add_argument(
+        "--glossary",
+        default=None,
+        metavar="PATH",
+        help="官方用語庫對照表路徑（預設取 language yaml 的 glossary_path；可用來切換 MC 版本）",
+    )
+    p.add_argument(
+        "--no-glossary",
+        action="store_true",
+        help="停用 Minecraft 官方用語庫提示（預設啟用）",
     )
     return p.parse_args()
 
@@ -201,12 +213,22 @@ def main():
         backed_up = backup_quest_configs(game_root)
         print(f"已備份 {backed_up} 個任務/設定資料夾至 quests_bak/")
 
+    glossary = None
+    if not args.no_glossary:
+        glossary_path = args.glossary or cfg.language.glossary_path
+        if glossary_path:
+            glossary = load_glossary(glossary_path)
+            if glossary is not None:
+                print(f"已載入官方用語庫：{len(glossary.terms):,} 條（{glossary_path}）")
+            else:
+                print(f"[警告] 無法載入用語庫 {glossary_path}，本次不使用官方用語庫。")
+
     if cfg.model.backend_mode == "remote":
         print("\n正在連線遠端 API…")
     else:
         print("\n正在連線或啟動本機模型服務…")
     try:
-        translator = build_translator(cfg.model, cfg.language.system_prompt)
+        translator = build_translator(cfg.model, cfg.language.system_prompt, glossary)
     except TranslatorFatalError as exc:
         print(f"模型服務啟動失敗：{exc}")
         raise SystemExit(1)
@@ -237,6 +259,7 @@ def main():
                 on_progress=_on_prefill_progress,
                 on_log=tqdm.write,
                 flush_cache=lambda: _flush_cache(cache_path, cache),
+                glossary=glossary,
             )
             bar.close()
             _flush_cache(cache_path, cache)

@@ -1,5 +1,6 @@
 import modpack_translator.pipeline.translator as tmod
 from modpack_translator.config import ModelConfig
+from modpack_translator.pipeline.glossary import Glossary
 from modpack_translator.pipeline.remote_translator import RemoteTranslator
 
 
@@ -53,7 +54,7 @@ def test_build_translator_returns_local_for_local_mode(monkeypatch):
     made = {}
 
     class DummyLocal:
-        def __init__(self, cfg, system_prompt):
+        def __init__(self, cfg, system_prompt, glossary=None):
             made["cfg"] = cfg
 
     monkeypatch.setattr(tmod, "GGUFTranslator", DummyLocal)
@@ -73,3 +74,37 @@ def test_local_translator_sends_repeat_penalty():
     out = tr.translate("hello")
     assert out == "x"
     assert cap["extra_body"] == {"repeat_penalty": 1.2}
+    # 未設 glossary 時 system prompt 不得被更動
+    assert cap["messages"][0]["content"] == "sys"
+
+
+def test_local_translator_injects_glossary_block():
+    cap = {}
+    tr = tmod.GGUFTranslator.__new__(tmod.GGUFTranslator)
+    tr._client = FakeClient(["x"], cap)
+    tr._model = "local-model"
+    tr._system_prompt = "sys"
+    tr._cfg = ModelConfig(max_tokens=10, temperature=0.0)
+    tr.glossary = Glossary({"Nether": "地獄"})
+
+    tr.translate("Go to the Nether")
+    system = cap["messages"][0]["content"]
+    assert system.startswith("sys\n\n[Glossary]")
+    assert "Nether = 地獄" in system
+
+    # 無命中時原樣送出
+    tr.translate("hello world")
+    assert cap["messages"][0]["content"] == "sys"
+
+
+def test_build_translator_forwards_glossary(monkeypatch):
+    made = {}
+
+    class DummyLocal:
+        def __init__(self, cfg, system_prompt, glossary=None):
+            made["glossary"] = glossary
+
+    monkeypatch.setattr(tmod, "GGUFTranslator", DummyLocal)
+    g = Glossary({"Nether": "地獄"})
+    tmod.build_translator(ModelConfig(backend_mode="local"), "sys", g)
+    assert made["glossary"] is g

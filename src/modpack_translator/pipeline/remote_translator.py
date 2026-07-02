@@ -12,6 +12,7 @@ from modpack_translator.pipeline._chat import (
     normalize_base_url,
     stream_chat,
 )
+from modpack_translator.pipeline.glossary import Glossary, augment_prompt
 
 
 def resolve_remote_settings(cfg: ModelConfig) -> tuple[str, str, str]:
@@ -35,12 +36,21 @@ def resolve_remote_settings(cfg: ModelConfig) -> tuple[str, str, str]:
 class RemoteTranslator:
     """對遠端 OpenAI 相容 API 做串流翻譯。無本地 server 生命週期，close() 為 no-op。"""
 
-    def __init__(self, cfg: ModelConfig, system_prompt: str) -> None:
+    # 類別層級預設：測試以 __new__ 跳過 __init__ 時仍可安全讀取
+    glossary: Glossary | None = None
+
+    def __init__(
+        self,
+        cfg: ModelConfig,
+        system_prompt: str,
+        glossary: Glossary | None = None,
+    ) -> None:
         base_url, api_key, model = resolve_remote_settings(cfg)
 
         self._cfg = cfg
         self._model = model
         self._system_prompt = system_prompt
+        self.glossary = glossary  # public：runner 以 getattr 取用做整串短路
         self._client = OpenAI(
             base_url=f"{normalize_base_url(base_url)}/v1",
             api_key=api_key or "not-needed",
@@ -52,7 +62,7 @@ class RemoteTranslator:
         return stream_chat(
             self._client,
             self._model,
-            self._system_prompt,
+            augment_prompt(self._system_prompt, self.glossary, [text]),
             text,
             max_tokens=self._cfg.max_tokens,
             temperature=self._cfg.temperature,

@@ -3,6 +3,7 @@ from openai import APIConnectionError, AuthenticationError
 
 import modpack_translator.pipeline.remote_translator as rt
 from modpack_translator.config import ModelConfig
+from modpack_translator.pipeline.glossary import Glossary
 
 
 class _Delta:
@@ -55,6 +56,28 @@ def test_remote_translate_omits_repeat_penalty(monkeypatch):
     assert out == "你好"
     assert "extra_body" not in cap
     assert cap["model"] == "gpt-4o-mini"
+
+
+def test_remote_translate_injects_glossary_block(monkeypatch):
+    cap = {}
+    monkeypatch.setattr(rt, "OpenAI", lambda **kw: FakeClient(["好"], cap))
+    cfg = ModelConfig(
+        backend_mode="remote",
+        remote_base_url="https://api.openai.com/v1",
+        remote_model="gpt-4o-mini",
+    )
+    tr = rt.RemoteTranslator(cfg, "sys", Glossary({"Shulker Box": "界伏盒"}))
+    tr.translate("Bring a Shulker Box")
+    system = cap["messages"][0]["content"]
+    assert system.startswith("sys\n\n[Glossary]")
+    assert "Shulker Box = 界伏盒" in system
+
+    # 無命中時原樣送出；未傳 glossary 的既有建構方式也不受影響
+    tr.translate("plain text")
+    assert cap["messages"][0]["content"] == "sys"
+    tr2 = rt.RemoteTranslator(cfg, "sys")
+    tr2.translate("Bring a Shulker Box")
+    assert cap["messages"][0]["content"] == "sys"
 
 
 def test_remote_cfg_beats_env_and_env_fills_blank(monkeypatch):

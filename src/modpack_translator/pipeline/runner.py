@@ -104,6 +104,13 @@ def _translate_validated(
     if static is not None and is_usable_translation(source, static):
         return static, True
 
+    # 整串正好是官方詞彙：直接用官方譯名，不呼叫模型（語義同靜態表短路）
+    glossary = getattr(translator, "glossary", None)
+    if glossary is not None:
+        official = glossary.exact_match(source)
+        if official is not None and is_usable_translation(source, official):
+            return official, True
+
     encoded, tokens = encode(source)
     final, ok = _translate_single(translator, encoded, tokens, retry_count, cancel_check)
     if ok and is_usable_translation(source, final):

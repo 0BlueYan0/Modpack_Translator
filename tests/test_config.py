@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from modpack_translator.config import ModelConfig
+from modpack_translator.config import LanguageConfig, ModelConfig
 
 
 def test_model_config_remote_defaults():
@@ -35,6 +35,16 @@ def test_model_config_prefill_bounds():
         ModelConfig(remote_timeout_s=0)
     with pytest.raises(ValidationError):
         ModelConfig(remote_backoff_retries=-1)
+
+
+def test_language_config_glossary_path_optional():
+    c = LanguageConfig(code="zh_tw", display_name="TC", system_prompt="sys")
+    assert c.glossary_path is None
+    c = LanguageConfig(
+        code="zh_tw", display_name="TC", system_prompt="sys",
+        glossary_path="assets/glossary/zh_tw_1.21.1.json",
+    )
+    assert c.glossary_path == "assets/glossary/zh_tw_1.21.1.json"
 
 
 def test_model_config_accepts_remote():

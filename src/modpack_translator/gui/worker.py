@@ -10,6 +10,7 @@ from PySide6.QtCore import QThread, Signal
 
 from modpack_translator.config import AppConfig
 from modpack_translator.pipeline.batch_prefill import prefill_translation_cache
+from modpack_translator.pipeline.glossary import load_glossary
 from modpack_translator.pipeline.patcher import (
     backup_mods,
     backup_quest_configs,
@@ -166,13 +167,24 @@ class TranslateWorker(QThread):
                 backed_up = backup_quest_configs(game_root)
                 self.log.emit(f"已備份 {backed_up} 個任務/設定資料夾至 quests_bak/")
 
+            # 官方用語庫：載入與 regex 編譯皆在 worker 執行緒內，建構後不可變、跨執行緒安全
+            glossary = None
+            if self._cfg.language.glossary_path:
+                glossary = load_glossary(self._cfg.language.glossary_path)
+                if glossary is not None:
+                    self.log.emit(f"已載入官方用語庫：{len(glossary.terms):,} 條")
+                else:
+                    self.log.emit("[警告] 無法載入官方用語庫，本次翻譯不使用用語庫。")
+
             if self._cfg.model.backend_mode == "remote":
                 self.log.emit("正在連線遠端 API，請稍候…")
             else:
                 self.log.emit("正在連線或啟動本機模型服務，請稍候…")
             translator = None
             try:
-                translator = build_translator(self._cfg.model, self._cfg.language.system_prompt)
+                translator = build_translator(
+                    self._cfg.model, self._cfg.language.system_prompt, glossary
+                )
                 self._translator = translator
             except Exception as exc:
                 self.error.emit(f"模型服務啟動失敗：{exc}")
@@ -194,6 +206,7 @@ class TranslateWorker(QThread):
                         on_progress=lambda done, tot: self.prefill_progress.emit(done, tot),
                         on_log=self.log.emit,
                         flush_cache=lambda: _flush_cache(cache_path, cache),
+                        glossary=glossary,
                     )
                     _flush_cache(cache_path, cache)
 
