@@ -213,7 +213,7 @@ uv run python main.py
 
 Windows 使用者也可以直接雙擊版本化 launcher，例如 `模組包翻譯器v1.6.0.exe`；它會先檢查是否已完成 setup，再在背景執行 `uv run python main.py`，launcher 錯誤會寫到 `.runtime/launcher.log`。
 
-啟動時，程式會在背景檢查最新 GitHub Release。有新版 release package 時才顯示更新視窗；沒有更新時不顯示任何訊息。自動更新會下載 release ZIP，若有 SHA256 檔會先驗證，接著套用新版原始碼、移除舊 `.venv` 與過期的本機後端 runtime 檔案、重新執行 setup，完成後再啟動新版程式。
+啟動時，程式會在背景檢查最新 GitHub Release。有新版 release package 時才顯示更新視窗；沒有更新時不顯示任何訊息。也可以隨時點擊標題列的「檢查更新」按鈕手動檢查：有新版時可在對話框中「直接更新」（含下載進度顯示），已是最新或檢查失敗都會明確回報。更新會下載 release ZIP，若有 SHA256 檔會先驗證，接著套用新版原始碼、移除舊 `.venv` 與過期的本機後端 runtime 檔案、重新執行 setup，完成後再啟動新版程式。已下載的模型（HuggingFace 快取）、翻譯快取（`outputs/translation_cache.json`）與 API 設定都會保留，不需要刪除資料夾重裝。
 
 **操作步驟：**
 
@@ -311,8 +311,8 @@ uv run python scripts/translate_modpack.py --modpack "C:/CurseForge/Instances/AT
 ## 常見問題
 
 **Q：ZIP 使用者要怎麼更新？**
-- 開啟程式即可。如果 GitHub Release 有新版，更新視窗會出現，按 **自動更新**。
-- updater 會保留使用者輸出與備份，但會重建 `.venv` 和本機後端設定，避免依賴衝突。
+- 開啟程式即可。如果 GitHub Release 有新版，更新視窗會出現，按 **直接更新**；也可以隨時用標題列的「檢查更新」按鈕手動檢查。
+- updater 會保留使用者輸出（含翻譯快取）、已下載模型與備份，但會重建 `.venv` 和本機後端設定，避免依賴衝突。
 - Release ZIP 由 GitHub Actions 根據 `v1.6.0` 這類 tag 自動產生。
 
 **Q：掃描找不到任何可翻譯的檔案。**

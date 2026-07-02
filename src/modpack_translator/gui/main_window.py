@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QProgressBar,
+    QProgressDialog,
     QPushButton,
     QRadioButton,
     QSpinBox,
@@ -36,7 +37,14 @@ from modpack_translator.gui.theme import apply_theme, eye_icon, restyle
 from modpack_translator.gui.worker import ScanWorker, TranslateWorker
 from modpack_translator.gui.stats import build_stats_text
 from modpack_translator.version import APP_NAME, APP_VERSION, __version__
-from scripts.updater import UpdateInfo, check_for_update, download_update, launch_apply_update
+from scripts.updater import (
+    RELEASES_URL,
+    DownloadCancelled,
+    UpdateInfo,
+    check_for_update,
+    download_update,
+    launch_apply_update,
+)
 
 
 def _to_int(value, default: int) -> int:
@@ -87,6 +95,8 @@ class MainWindow(QMainWindow):
         self._scan_worker: ScanWorker | None = None
         self._update_check_worker: UpdateCheckWorker | None = None
         self._update_download_worker: UpdateDownloadWorker | None = None
+        self._update_progress_dialog: QProgressDialog | None = None
+        self._update_download_info: UpdateInfo | None = None
         self._conn_test_worker = None
 
         self._translated_modpack_path: str = ""
@@ -169,9 +179,20 @@ class MainWindow(QMainWindow):
         self.theme_btn.setToolTip("切換深色 / 淺色主題")
         self.theme_btn.clicked.connect(self._toggle_theme)
 
+        self.update_btn = QPushButton("檢查更新")
+        self.update_btn.setFixedHeight(32)
+        self.update_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.update_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.update_btn.setToolTip(
+            "檢查 GitHub 是否有新版本並可直接更新。\n"
+            "更新為就地覆蓋：已下載的模型、翻譯快取（outputs/）與 API 設定都會保留。"
+        )
+        self.update_btn.clicked.connect(self._manual_check_for_updates)
+
         header_row.addWidget(title_lbl)
         header_row.addWidget(version_chip)
         header_row.addStretch()
+        header_row.addWidget(self.update_btn)
         header_row.addWidget(self.theme_btn)
         root_layout.addLayout(header_row)
 
@@ -590,12 +611,42 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ 更新
 
-    def _check_for_updates(self):
+    def _check_for_updates(self, silent: bool = True):
+        """檢查 GitHub Releases。silent=True（啟動時）只在有新版本時打擾使用者；
+        silent=False（按鈕觸發）另外回報「已是最新」與「檢查失敗」。"""
         if self._update_check_worker and self._update_check_worker.isRunning():
             return
         self._update_check_worker = UpdateCheckWorker(__version__)
         self._update_check_worker.update_available.connect(self._show_update_dialog)
+        if not silent:
+            self._update_check_worker.no_update.connect(self._on_no_update)
+            self._update_check_worker.error.connect(self._on_update_check_error)
+        self._update_check_worker.finished.connect(self._on_update_check_finished)
+        self.update_btn.setEnabled(False)
+        self.update_btn.setText("檢查中…")
         self._update_check_worker.start()
+
+    def _manual_check_for_updates(self):
+        self._check_for_updates(silent=False)
+
+    def _on_update_check_finished(self):
+        # 下載進行中時按鈕由下載流程控制，不在這裡搶著恢復
+        if self._update_download_worker and self._update_download_worker.isRunning():
+            return
+        self.update_btn.setEnabled(True)
+        self.update_btn.setText("檢查更新")
+
+    def _on_no_update(self):
+        QMessageBox.information(
+            self, "檢查更新", f"目前已是最新版本（{APP_VERSION}）。"
+        )
+
+    def _on_update_check_error(self, msg: str):
+        QMessageBox.warning(
+            self,
+            "檢查更新失敗",
+            f"{msg}\n\n也可以手動前往 Releases 頁面下載：\n{RELEASES_URL}",
+        )
 
     def _show_update_dialog(self, info: UpdateInfo):
         size_mb = info.asset_size / (1024 * 1024) if info.asset_size else 0
@@ -607,14 +658,15 @@ class MainWindow(QMainWindow):
             f"最新版本：{info.tag_name}\n"
             f"下載大小：{size_mb:.1f} MB\n\n"
             f"{notes or '此版本沒有 release notes。'}\n\n"
-            "是否下載並自動套用更新？程式會關閉，移除舊的虛擬環境與後端設定，"
-            "重新執行 setup，完成後再啟動新版。"
+            "是否下載並直接更新？程式會關閉，移除舊的虛擬環境與後端設定，"
+            "重新執行 setup，完成後再啟動新版。\n"
+            "已下載的模型、翻譯快取（outputs/）與 API 設定都會保留。"
         )
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Information)
         box.setWindowTitle("發現新版本")
         box.setText(message)
-        update_btn = box.addButton("自動更新", QMessageBox.ButtonRole.AcceptRole)
+        update_btn = box.addButton("直接更新", QMessageBox.ButtonRole.AcceptRole)
         box.addButton("稍後", QMessageBox.ButtonRole.RejectRole)
         box.exec()
         if box.clickedButton() is update_btn:
@@ -626,12 +678,72 @@ class MainWindow(QMainWindow):
             return
         if self._update_download_worker and self._update_download_worker.isRunning():
             return
-        self._update_download_worker = UpdateDownloadWorker(info)
-        self._update_download_worker.finished_path.connect(self._apply_downloaded_update)
-        self._update_download_worker.error.connect(
-            lambda msg: QMessageBox.critical(self, "更新失敗", msg)
-        )
-        self._update_download_worker.start()
+
+        self.update_btn.setEnabled(False)
+        self.update_btn.setText("下載更新中…")
+
+        dlg = QProgressDialog(f"正在下載 {info.tag_name} 更新…", "取消", 0, 1000, self)
+        dlg.setWindowTitle("下載更新")
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setMinimumDuration(0)
+        dlg.setMinimumWidth(420)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        dlg.setValue(0)
+        self._update_progress_dialog = dlg
+        self._update_download_info = info
+
+        worker = UpdateDownloadWorker(info)
+        self._update_download_worker = worker
+        worker.progress.connect(self._on_update_download_progress)
+        worker.finished_path.connect(self._on_update_download_done)
+        worker.cancelled.connect(self._on_update_download_cancelled)
+        worker.error.connect(self._on_update_download_error)
+        dlg.canceled.connect(worker.cancel)
+        self._append_log(f"開始下載更新 {info.tag_name}（{info.asset_name}）…")
+        worker.start()
+
+    def _close_update_progress_dialog(self):
+        dlg = self._update_progress_dialog
+        if dlg is not None:
+            self._update_progress_dialog = None
+            # 先斷開 canceled，避免程式關閉對話框被誤判成使用者取消
+            try:
+                dlg.canceled.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            dlg.close()
+            dlg.deleteLater()
+        self.update_btn.setEnabled(True)
+        self.update_btn.setText("檢查更新")
+
+    def _on_update_download_progress(self, done: int, total: int):
+        dlg = self._update_progress_dialog
+        if dlg is None:
+            return
+        info = self._update_download_info
+        tag = info.tag_name if info else ""
+        done_mb = done / (1024 * 1024)
+        if total > 0:
+            dlg.setValue(min(1000, int(done * 1000 / total)))
+            dlg.setLabelText(
+                f"正在下載 {tag} 更新… {done_mb:.1f} / {total / (1024 * 1024):.1f} MB"
+            )
+        else:
+            dlg.setLabelText(f"正在下載 {tag} 更新… {done_mb:.1f} MB")
+
+    def _on_update_download_done(self, zip_path: str):
+        self._close_update_progress_dialog()
+        self._append_log("更新下載完成，準備套用並重新啟動…")
+        self._apply_downloaded_update(zip_path)
+
+    def _on_update_download_cancelled(self):
+        self._close_update_progress_dialog()
+        self._append_log("已取消下載更新。")
+
+    def _on_update_download_error(self, msg: str):
+        self._close_update_progress_dialog()
+        QMessageBox.critical(self, "更新失敗", msg)
 
     def _apply_downloaded_update(self, zip_path: str):
         try:
@@ -1016,36 +1128,66 @@ class MainWindow(QMainWindow):
             if not self._translate_worker.wait(10_000):
                 self._translate_worker.terminate()
                 self._translate_worker.wait(2_000)
+        if self._update_download_worker and self._update_download_worker.isRunning():
+            self._update_download_worker.cancel()
+            if not self._update_download_worker.wait(3_000):
+                self._update_download_worker.terminate()
+                self._update_download_worker.wait(1_000)
+        if self._update_check_worker and self._update_check_worker.isRunning():
+            if not self._update_check_worker.wait(2_000):
+                self._update_check_worker.terminate()
+                self._update_check_worker.wait(1_000)
         event.accept()
 
 
 class UpdateCheckWorker(QThread):
     update_available = Signal(object)
+    no_update = Signal()
+    error = Signal(str)
 
     def __init__(self, current_version: str):
         super().__init__()
         self._current_version = current_version
 
     def run(self):
-        info = check_for_update(self._current_version)
+        try:
+            info = check_for_update(self._current_version, raise_errors=True)
+        except Exception as exc:
+            self.error.emit(str(exc))
+            return
         if info is not None:
             self.update_available.emit(info)
+        else:
+            self.no_update.emit()
 
 
 class UpdateDownloadWorker(QThread):
+    progress = Signal(int, int)  # (已下載 bytes, 總 bytes；總數未知時為 0)
     finished_path = Signal(str)
+    cancelled = Signal()
     error = Signal(str)
 
     def __init__(self, info: UpdateInfo):
         super().__init__()
         self._info = info
+        self._cancel = False
+
+    def cancel(self):
+        self._cancel = True
 
     def run(self):
+        def _cb(done: int, total: int) -> bool:
+            self.progress.emit(done, total)
+            return not self._cancel
+
         try:
-            path = download_update(self._info)
-            self.finished_path.emit(str(path))
+            path = download_update(self._info, progress_cb=_cb)
+        except DownloadCancelled:
+            self.cancelled.emit()
         except Exception as exc:
             self.error.emit(str(exc))
+        else:
+            self.finished_path.emit(str(path))
 
 
 class ConnTestWorker(QThread):
