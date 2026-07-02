@@ -409,7 +409,7 @@ class MainWindow(QMainWindow):
 
         # ── 掃描結果面板 ──────────────────────────────────────────────────
         result_header = QHBoxLayout()
-        result_lbl = QLabel("掃描結果")
+        result_lbl = QLabel("輸出記錄")
         result_lbl.setObjectName("sectionLabel")
         copy_btn = QPushButton("複製")
         copy_btn.setFixedWidth(64)
@@ -526,6 +526,12 @@ class MainWindow(QMainWindow):
 
     def _copy_log(self):
         QApplication.clipboard().setText(self.log_edit.toPlainText())
+
+    def _append_log(self, msg: str):
+        """附加一行帶時間戳的訊息到輸出記錄區並捲到底。worker signal 經 queued connection 呼叫,固定在 GUI 執行緒執行。"""
+        ts = time.strftime("%H:%M:%S")
+        self.log_edit.append(f"[{ts}] {msg}")
+        self.log_edit.moveCursor(QTextCursor.MoveOperation.End)
 
     # ------------------------------------------------------------------ 主題 / 樣式
 
@@ -678,6 +684,7 @@ class MainWindow(QMainWindow):
             skip_quests=not self.chk_quests.isChecked(),
             lang_code=(self._cfg.language.code if self._cfg else "zh_tw"),
         )
+        self._scan_worker.log.connect(self._append_log)
         self._scan_worker.finished.connect(self._on_scan_finished)
         self._scan_worker.error.connect(self._on_error)
         self._scan_worker.start()
@@ -703,7 +710,7 @@ class MainWindow(QMainWindow):
                 "  • 未勾選任何翻譯選項\n"
                 "  • 模組語言檔不含英文（en_us）字串",
             )
-            self.log_edit.setPlainText("掃描完成 — 未找到可翻譯的檔案。")
+            self.log_edit.append("掃描完成 — 未找到可翻譯的檔案。")
             return
 
         modpack_path = self.modpack_edit.text().strip()
@@ -731,7 +738,7 @@ class MainWindow(QMainWindow):
                     lines.append(f"    ({mod_id})  {key}")
                     lines.append(f'    → "{display}"')
 
-        self.log_edit.setPlainText("\n".join(lines))
+        self.log_edit.append("\n".join(lines))
         self.translate_btn.setEnabled(True)
 
     # ------------------------------------------------------------------ 翻譯
@@ -795,21 +802,26 @@ class MainWindow(QMainWindow):
         self.stats_label.setVisible(True)
         self._stats_timer.start()
 
+        self.log_edit.append("\n" + "─" * 40)
+
         self._translate_worker = TranslateWorker(
             targets=self._scan_targets,
             cfg=cfg,
             modpack_path=modpack_path,
             retry_count=self.retry_spin.value(),
         )
+        self._translate_worker.log.connect(self._append_log)
         self._translate_worker.progress.connect(self._on_translate_progress)
         self._translate_worker.pair_progress.connect(self._on_pair_progress)
         self._translate_worker.finished.connect(self._on_translate_finished)
         self._translate_worker.error.connect(self._on_error)
         self._translate_worker.start()
 
-    def _on_translate_progress(self, current: int, total: int, mod_id: str, pairs_done: int):
-        # 只追蹤目前第幾個檔案；進度條改由 _on_pair_progress 逐條更新
+    def _on_translate_progress(self, current: int, total: int, mod_id: str, fmt: str, pairs_done: int):
+        # 追蹤目前第幾個檔案並在 log 區顯示；進度條由 _on_pair_progress 逐條更新
         self._current_progress = current + 1
+        display_fmt = _FMT_NAME_MAP.get(fmt, fmt)
+        self._append_log(f"({current + 1}/{total}) 翻譯 {mod_id}（{display_fmt}）…")
 
     def _on_pair_progress(self, pairs_done: int):
         """每條字串翻譯完成後（節流版）由 worker 呼叫，同步更新進度條與滑動視窗樣本。"""

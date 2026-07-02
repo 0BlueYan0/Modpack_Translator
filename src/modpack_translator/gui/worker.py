@@ -117,7 +117,7 @@ class ScanWorker(QThread):
 
 class TranslateWorker(QThread):
     log          = Signal(str)
-    progress     = Signal(int, int, str, int) # current_idx, total, mod_id, pairs_done_so_far
+    progress     = Signal(int, int, str, str, int) # current_idx, total, mod_id, format, pairs_done_so_far
     pair_progress = Signal(int)               # 每條字串完成後：累計已處理對數
     finished     = Signal(int, int, int, int) # translated, cached, fallback, failed_files
     error    = Signal(str)
@@ -194,7 +194,7 @@ class TranslateWorker(QThread):
                         self.log.emit("已由使用者取消翻譯。")
                         break
 
-                    self.progress.emit(i, total, target.mod_id, total_pairs_done)
+                    self.progress.emit(i, total, target.mod_id, target.format, total_pairs_done)
 
                     try:
                         n_t, n_c, n_f, failed = process_target(
