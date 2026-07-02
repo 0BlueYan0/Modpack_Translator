@@ -142,7 +142,9 @@ def collect_prefill_items(
             ck = cache_key(src)
             if ck in seen:
                 continue
-            if ck in cache and is_usable_translation(src, cache[ck]):
+            if ck in cache and is_usable_translation(
+                src, cache[ck], accept_identical_proper_noun=True
+            ):
                 continue
             static = _static_translation(src)
             if static is not None and is_usable_translation(src, static):
@@ -399,7 +401,9 @@ def _process_batch(
             if raw_text is not None:
                 # 與序列路徑完全相同的逐條驗證：硬性 token 保留 + 可用性檢查
                 candidate, ok = process(raw_text, enc.encoded, enc.tokens)
-                if ok and is_usable_translation(enc.item.source, candidate):
+                if ok and is_usable_translation(
+                    enc.item.source, candidate, accept_identical_proper_noun=True
+                ):
                     final = candidate
             results.append((enc, final))
         return _BatchResult(results=results, unparseable=unparseable)

@@ -113,7 +113,8 @@ def _translate_validated(
 
     encoded, tokens = encode(source)
     final, ok = _translate_single(translator, encoded, tokens, retry_count, cancel_check)
-    if ok and is_usable_translation(source, final):
+    # 模型輸出關卡開啟專有名詞豁免：模型對模組名、人名等原樣返回是正確判斷
+    if ok and is_usable_translation(source, final, accept_identical_proper_noun=True):
         return final, True
     return source, False
 
@@ -163,7 +164,10 @@ def _translate_segmented_text(
         changed = changed or part_final != part
 
     combined = "".join(translated_parts)
-    if changed and is_usable_translation(source, combined):
+    if not changed:
+        # 每個內容段都各自通過驗證且原樣即正確（如模組名列表），整串照原樣接受
+        return source, True
+    if is_usable_translation(source, combined):
         return combined, True
     final, ok = _translate_sentence_segmented_text(translator, source, retry_count, cancel_check)
     if ok:
@@ -198,7 +202,9 @@ def _translate_sentence_segmented_text(
         changed = changed or part_final != part
 
     combined = "".join(translated_parts)
-    if changed and is_usable_translation(source, combined):
+    if not changed:
+        return source, True
+    if is_usable_translation(source, combined):
         return combined, True
     return source, False
 
@@ -232,7 +238,9 @@ def _translate_patchouli_text(
         changed = changed or part_final != part
 
     combined = "".join(translated_parts)
-    if changed and is_usable_translation(source, combined):
+    if not changed:
+        return source, True
+    if is_usable_translation(source, combined):
         return combined, True
     return source, False
 
@@ -262,7 +270,9 @@ def translate_dict(
                 on_pair_done(1)
             continue
         ck = cache_key(src)
-        if ck in cache and is_usable_translation(src, cache[ck]):
+        if ck in cache and is_usable_translation(
+            src, cache[ck], accept_identical_proper_noun=True
+        ):
             result[key] = cache[ck]
             n_cached += 1
             if on_pair_done is not None:
@@ -423,7 +433,9 @@ def _process_patchouli(
             break
         src = source_strings[path_key]
         ck = cache_key(src)
-        if ck in cache and is_usable_translation(src, cache[ck]):
+        if ck in cache and is_usable_translation(
+            src, cache[ck], accept_identical_proper_noun=True
+        ):
             write_patchouli_text(page, path_key, cache[ck])
             changed = True
             n_cached += 1

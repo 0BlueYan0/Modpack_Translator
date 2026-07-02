@@ -22,12 +22,15 @@ def process(raw_translation: str, source_text: str, tokens: list[str]) -> tuple[
     回傳 (final_text, ok)，ok=False 表示硬性 token 遺失，呼叫端應回退至原文。
     """
     text = strip_preamble(raw_translation)
-    text = decode(text, tokens)
 
-    # 檢查 decode 後是否仍有越界的 {N}（模型自行生成的錯誤索引）
+    # 越界 {N} 檢查必須在 decode 之前做：模型只看得到 {0}..{len-1}，
+    # 原始輸出中出現其他索引即為幻覺。decode 之後檢查會把還原出來的
+    # 數字字面 token（如來源本身的 "{35}"、"{4}"）誤判成越界而必然拒絕。
     remaining = {int(m.group(1)) for m in _PH_RE.finditer(text)}
     if remaining - set(range(len(tokens))):
         return source_text, False
+
+    text = decode(text, tokens)
 
     # 分層驗證：只有硬性 token 遺失才拒絕翻譯
     for idx, token in enumerate(tokens):

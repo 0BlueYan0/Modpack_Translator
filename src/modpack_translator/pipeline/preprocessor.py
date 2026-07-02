@@ -97,7 +97,13 @@ _GENERIC_UNTRANSLATED_WORDS = {
 }
 
 
-def is_usable_translation(source: str, target: str, key: str | None = None) -> bool:
+def is_usable_translation(
+    source: str,
+    target: str,
+    key: str | None = None,
+    *,
+    accept_identical_proper_noun: bool = False,
+) -> bool:
     if not _has_translatable_text(source):
         return True
 
@@ -111,12 +117,40 @@ def is_usable_translation(source: str, target: str, key: str | None = None) -> b
             return True
         # 任務標題常刻意保留英文專有名詞（模組名、玩家 ID）。既有翻譯檔中
         # 與原文完全相同的標題視為譯者的選擇，不再重複送翻。
-        return _is_quest_title_key(key) and _looks_like_proper_noun_phrase(src)
+        # accept_identical_proper_noun 供模型輸出關卡與快取讀取使用：模型對
+        # 專有名詞（模組名、方塊名、人名）原樣返回是正確判斷，不算翻譯失敗；
+        # diff_keys 的既有譯文檢查不開啟，避免既有 zh 檔中未翻譯的一般名稱被跳過。
+        if not _looks_like_proper_noun_phrase(src):
+            return False
+        return accept_identical_proper_noun or _is_quest_title_key(key)
     if not _preserves_required_tokens(source, target):
         return False
     if needs_visible_translation and not _has_cjk_text(target):
         return False
     return not _looks_undertranslated(source, target)
+
+
+# 程式識別字：正確譯文必須原樣保留這些內容，計算「未翻譯殘留」與專有名詞
+# 判斷前先剝除，其中的小寫單字（player、button、menu…）才不會被當成漏翻。
+_CODE_IDENTIFIER_RE = re.compile(
+    r"\$\$\w+"                          # FancyMenu 變數：$$button
+    r"|%\w+%"                           # 佔位符變數：%player%
+    r"|@\w+(?:\([^()]*\))?"             # 實體過濾器：@player、@animal(age=adult)
+    r"|#[\w-]{2,}"                      # 頻道 / 標籤：#allthemons-techsupport
+    r"|\b\w+(?:\.\w+)+(?::\d+)?\b"      # 點分識別字：q.player、some.menu.identifier:505280
+    r"|'[^'\s]+'"                       # 引號包住的無空白字面值
+    r'|"[^"\s]+"'
+)
+# 括號內逗號分隔的小寫字面值枚舉：(left, right, middle)。這是變數的可能
+# 回傳值列表，譯文保留原文（含中文頓號分隔）不算漏翻。
+_LITERAL_ENUM_RE = re.compile(
+    r"[(（]\s*[a-z][\w-]*(?:\s*[,、，]\s*[a-z][\w-]*)+\s*[)）]"
+)
+
+
+def _strip_code_literals(text: str) -> str:
+    text = _CODE_IDENTIFIER_RE.sub(" ", text)
+    return _LITERAL_ENUM_RE.sub(" ", text)
 
 
 def _looks_undertranslated(source: str, target: str) -> bool:
@@ -126,8 +160,9 @@ def _looks_undertranslated(source: str, target: str) -> bool:
     src_words = _english_words(_PLACEHOLDERS.sub(" ", source))
     # 只算譯文中全小寫的英文單字：zh_tw 慣例以「譯名 (English Term)」保留
     # 原文標註，人名也常保留英文，這些都是首字大寫，不視為未翻譯殘留。
+    plain_target = _strip_code_literals(_PLACEHOLDERS.sub(" ", target))
     target_words = {
-        m.group(0) for m in re.finditer(r"\b[a-z]{2,}\b", _PLACEHOLDERS.sub(" ", target))
+        m.group(0) for m in re.finditer(r"\b[a-z]{2,}\b", plain_target)
     }
     leaked = src_words & target_words & _GENERIC_UNTRANSLATED_WORDS
     return bool(leaked)
@@ -167,7 +202,8 @@ def _is_quest_title_key(key: str | None) -> bool:
 
 def _looks_like_proper_noun_phrase(text: str) -> bool:
     plain = _PLACEHOLDERS.sub(" ", text)
-    words = re.findall(r"[A-Za-z][\w'.-]*", plain)
+    plain = _CODE_IDENTIFIER_RE.sub(" ", plain)
+    words = re.findall(r"[A-Za-z0-9][\w'.-]*", plain)
     if not words or len(words) > 5:
         return False
     return all(
@@ -380,7 +416,11 @@ def _is_metadata_key(key: str) -> bool:
         return True
     if "painting." in key and key.endswith(".author"):
         return True
-    if "music_disc" in key and key.endswith((".desc", ".description")):
+    # 唱片曲目說明（artist - title）：music_disc_*.desc、disc_*.desc 都是
+    if re.search(r"(?:^|[._-])disc[._-]", key) and key.endswith((".desc", ".description")):
+        return True
+    # 拉丁學名（productivetrees/productivefarming 的 *.latin）原樣保留
+    if key.endswith(".latin"):
         return True
     if key.startswith(("itemgroup.", "key.category.")):
         return True
@@ -410,6 +450,9 @@ def _is_copy_only_key_value(key: str, value: str) -> bool:
     ):
         return True
     if key.endswith((".docs", ".discord", ".github", ".modrinth", ".wiki")):
+        return True
+    # 指令鍵下的單一小寫單字是指令字面值（如 create.command.killTPSCommand = "killtps"）
+    if ".command" in key and re.fullmatch(r"[a-z][a-z0-9_-]{2,}", text):
         return True
     if key.endswith((".color", ".colour")) and _HEX_COLOR_RE.fullmatch(text):
         return True
@@ -451,13 +494,42 @@ def _is_untranslatable_value(value: str) -> bool:
         return True
     if _looks_like_code_or_table_line(text):
         return True
+    if _is_time_format(text):
+        return True
+    if _looks_like_color_code_art(text):
+        return True
     return False
 
 
 def _is_url_or_domain(text: str) -> bool:
-    if re.fullmatch(r"[a-z][a-z0-9+.-]*://\S+", text, re.IGNORECASE):
+    # 色碼包住的裸域名（"&o&bexample.github.io&f&r."）也是純連結：
+    # 剝除色碼等標記與頭尾標點後再整串比對。
+    plain = _PLACEHOLDERS.sub(" ", text).strip()
+    plain = plain.rstrip(" .,;:!?…")
+    if re.fullmatch(r"[a-z][a-z0-9+.-]*://\S+", plain, re.IGNORECASE):
         return True
-    return bool(re.fullmatch(r"(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/\S*)?", text, re.IGNORECASE))
+    return bool(re.fullmatch(r"(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/\S*)?", plain, re.IGNORECASE))
+
+
+def _is_time_format(text: str) -> bool:
+    # 日期時間格式樣板（如 AE2 的 ETAFormat = "HH:mm:ss"）
+    return bool(re.fullmatch(r"[HhmsS]{1,2}(?::[HhmsS]{1,2}){1,2}", text))
+
+
+def _looks_like_color_code_art(text: str) -> bool:
+    """色碼穿插在單字字母之間的藝術字標題（如 "&l&cDy&6en&ea&ami&bcs&r"）。
+
+    每個色碼之間只剩 1-3 個字母的碎片，拼不出可翻譯的單字，任何模型
+    輸出都無法通過驗證，直接視為不可譯。"""
+    codes = re.findall(r"[&§][0-9A-FK-ORa-fk-or]", text)
+    if len(codes) < 4:
+        return False
+    fragments = [
+        part.strip()
+        for part in re.split(r"[&§][0-9A-FK-ORa-fk-or]", text)
+        if part.strip()
+    ]
+    return bool(fragments) and all(len(part) <= 3 for part in fragments)
 
 
 def _is_hex_color(text: str) -> bool:
