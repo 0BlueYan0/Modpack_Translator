@@ -348,6 +348,18 @@ class ModpackScanner:
             ))
         return targets
 
+    # 任務 lang 檔的鍵形如 quest.0000A88BB40B2149.title。誤放到 chapters/ 等
+    # 結構目錄的 lang 檔不會被遊戲讀取，且其內容已由 lang/ 樹處理，需跳過
+    # 以免 inline 掃描把整份鍵值當成未翻譯的內文重翻一遍。
+    _SNBT_LANG_KEY_LINE_RE = re.compile(
+        r"^\s*(?:chapter|chapter_group|quest|task|reward|reward_table|loot_crate|file)"
+        r"\.[0-9A-Fa-f]{16}\.[A-Za-z_]+\s*:",
+        re.MULTILINE,
+    )
+
+    def _looks_like_snbt_lang_file(self, raw: str) -> bool:
+        return len(self._SNBT_LANG_KEY_LINE_RE.findall(raw)) >= 2
+
     def _scan_inline_snbt_files(self, root: Path, mod_id: str, fmt: str) -> list[TranslationTarget]:
         if not root.is_dir():
             return []
@@ -359,6 +371,12 @@ class ModpackScanner:
             if relative_parts & skip_dirs:
                 continue
             if self._is_ignored_lang_path(source_file):
+                continue
+            try:
+                raw = source_file.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            if self._looks_like_snbt_lang_file(raw):
                 continue
             try:
                 strings = read_inline_snbt_text(source_file)

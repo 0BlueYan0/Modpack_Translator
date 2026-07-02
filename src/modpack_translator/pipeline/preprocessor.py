@@ -97,7 +97,7 @@ _GENERIC_UNTRANSLATED_WORDS = {
 }
 
 
-def is_usable_translation(source: str, target: str) -> bool:
+def is_usable_translation(source: str, target: str, key: str | None = None) -> bool:
     if not _has_translatable_text(source):
         return True
 
@@ -107,7 +107,11 @@ def is_usable_translation(source: str, target: str) -> bool:
         return False
     needs_visible_translation = _requires_visible_translation(source)
     if dst == src:
-        return not needs_visible_translation
+        if not needs_visible_translation:
+            return True
+        # 任務標題常刻意保留英文專有名詞（模組名、玩家 ID）。既有翻譯檔中
+        # 與原文完全相同的標題視為譯者的選擇，不再重複送翻。
+        return _is_quest_title_key(key) and _looks_like_proper_noun_phrase(src)
     if not _preserves_required_tokens(source, target):
         return False
     if needs_visible_translation and not _has_cjk_text(target):
@@ -120,7 +124,11 @@ def _looks_undertranslated(source: str, target: str) -> bool:
         return False
 
     src_words = _english_words(_PLACEHOLDERS.sub(" ", source))
-    target_words = _english_words(_PLACEHOLDERS.sub(" ", target))
+    # 只算譯文中全小寫的英文單字：zh_tw 慣例以「譯名 (English Term)」保留
+    # 原文標註，人名也常保留英文，這些都是首字大寫，不視為未翻譯殘留。
+    target_words = {
+        m.group(0) for m in re.finditer(r"\b[a-z]{2,}\b", _PLACEHOLDERS.sub(" ", target))
+    }
     leaked = src_words & target_words & _GENERIC_UNTRANSLATED_WORDS
     return bool(leaked)
 
@@ -130,13 +138,42 @@ def _preserves_required_tokens(source: str, target: str) -> bool:
     for token in tokens:
         if _is_soft_token(token):
             continue
+        # FTB Quests 換行有兩種等價寫法：字面 "\n"（反斜線+n）與真換行字元。
+        # en_us 與既有翻譯可能各用一種，兩者互相認可，否則整包譯文會被誤判未翻譯。
+        if token == "\\n":
+            if "\\n" not in target and "\n" not in target:
+                return False
+            continue
         if token not in target:
             return False
     return True
 
 
 def _is_soft_token(token: str) -> bool:
-    return bool(re.fullmatch(r"[&§][0-9A-FK-ORa-fk-or]", token))
+    # \& 只是跳脫的 & 符號；譯文改寫句子時捨棄它不影響可讀性
+    return bool(re.fullmatch(r"[&§][0-9A-FK-ORa-fk-or]|\\&", token))
+
+
+_QUEST_TITLE_KEY_RE = re.compile(
+    r"^(?:chapter|chapter_group|quest|task|reward|reward_table|loot_crate|file)\."
+    r"[0-9A-Fa-f]+\.(?:title|subtitle|quest_subtitle)(?:\[\d+\])?$"
+)
+_PROPER_NOUN_CONNECTOR_WORDS = {"a", "an", "and", "de", "of", "the"}
+
+
+def _is_quest_title_key(key: str | None) -> bool:
+    return bool(key and _QUEST_TITLE_KEY_RE.fullmatch(key))
+
+
+def _looks_like_proper_noun_phrase(text: str) -> bool:
+    plain = _PLACEHOLDERS.sub(" ", text)
+    words = re.findall(r"[A-Za-z][\w'.-]*", plain)
+    if not words or len(words) > 5:
+        return False
+    return all(
+        word[0].isupper() or word[0].isdigit() or word.lower() in _PROPER_NOUN_CONNECTOR_WORDS
+        for word in words
+    )
 
 
 _TRANSLATION_OPTIONAL_WORDS = {
@@ -534,7 +571,7 @@ def diff_keys(en_dict: dict[str, str], zh_dict: dict[str, str]) -> set[str]:
         k
         for k in translatable_keys
         if k in zh_dict
-        and not is_usable_translation(en_dict[k], zh_dict[k])
+        and not is_usable_translation(en_dict[k], zh_dict[k], key=k)
     }
     return missing | untranslated
 

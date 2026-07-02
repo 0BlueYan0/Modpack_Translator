@@ -14,7 +14,7 @@ import tempfile
 from dataclasses import dataclass
 
 from PySide6.QtCore import QPointF, Qt
-from PySide6.QtGui import QColor, QPainter, QPen, QPixmap, QPolygonF
+from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import QApplication, QWidget
 
 
@@ -156,6 +156,51 @@ def _arrow_icon(color: str, up: bool) -> str:
     out = path.replace("\\", "/")
     _ICON_CACHE[key] = out
     return out
+
+
+def _eye_icon_path(color: str, slashed: bool) -> str:
+    """眼睛圖示（顯示/隱藏密碼用）。emoji 在 Windows 上會被字型度量擠壓變形，
+    改以 QPainter 自繪確保任何 DPI / 主題下都清晰。"""
+    key = ("eye", color, slashed)
+    if key in _ICON_CACHE:
+        return _ICON_CACHE[key]
+    pm = QPixmap(20, 20)
+    pm.fill(Qt.GlobalColor.transparent)
+    pt = QPainter(pm)
+    pt.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor(color))
+    pen.setWidthF(1.6)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pt.setPen(pen)
+    pt.setBrush(Qt.BrushStyle.NoBrush)
+    # 眼形輪廓：上下兩條對稱弧線
+    eye = QPainterPath()
+    eye.moveTo(2.5, 10)
+    eye.quadTo(10, 3.2, 17.5, 10)
+    eye.moveTo(2.5, 10)
+    eye.quadTo(10, 16.8, 17.5, 10)
+    pt.drawPath(eye)
+    # 瞳孔
+    pt.setPen(Qt.PenStyle.NoPen)
+    pt.setBrush(QColor(color))
+    pt.drawEllipse(QPointF(10, 10), 2.6, 2.6)
+    if slashed:
+        pen.setWidthF(1.8)
+        pt.setPen(pen)
+        pt.drawLine(QPointF(4.5, 16.5), QPointF(15.5, 3.5))
+    pt.end()
+    suffix = "off" if slashed else "on"
+    path = os.path.join(_icon_dir(), f"eye_{suffix}_{color.lstrip('#')}.png")
+    pm.save(path, "PNG")
+    out = path.replace("\\", "/")
+    _ICON_CACHE[key] = out
+    return out
+
+
+def eye_icon(mode: str, slashed: bool) -> QIcon:
+    """依主題色回傳顯示/隱藏密碼的眼睛圖示。slashed=True 為劃線（隱藏）版本。"""
+    p = PALETTES.get(mode, LIGHT)
+    return QIcon(_eye_icon_path(p.text_muted, slashed))
 
 
 def build_stylesheet(p: Palette) -> str:
@@ -357,6 +402,15 @@ QPushButton#helpButton {{
 QPushButton#helpButton:hover {{
     background-color: {p.primary};
     color: {p.on_accent};
+}}
+
+/* 顯示 / 隱藏 API 金鑰按鈕：純圖示，取消文字按鈕的水平 padding 以免圖示被擠壓 */
+QPushButton#eyeButton {{
+    padding: 0;
+}}
+QPushButton#eyeButton:checked {{
+    background-color: {p.hover};
+    border-color: {p.border_strong};
 }}
 
 /* 標題列主題切換按鈕 */

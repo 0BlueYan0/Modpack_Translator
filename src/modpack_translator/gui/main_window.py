@@ -4,7 +4,7 @@ import time
 from collections import deque
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QSettings, QThread, QTimer, Signal
+from PySide6.QtCore import Qt, QSettings, QSize, QThread, QTimer, Signal
 from PySide6.QtGui import QFont, QIcon, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
@@ -32,7 +32,7 @@ _PROJECT_ROOT = Path(__file__).parents[3]
 _APP_ICON_PATH = _PROJECT_ROOT / "assets" / "icon" / "app_icon.png"
 
 from modpack_translator.config import load_config
-from modpack_translator.gui.theme import apply_theme, restyle
+from modpack_translator.gui.theme import apply_theme, eye_icon, restyle
 from modpack_translator.gui.worker import ScanWorker, TranslateWorker
 from modpack_translator.version import APP_NAME, APP_VERSION, __version__
 from scripts.updater import UpdateInfo, check_for_update, download_update, launch_apply_update
@@ -284,11 +284,16 @@ class MainWindow(QMainWindow):
         self.remote_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.remote_key_edit.setPlaceholderText("sk-...")
         self.remote_key_edit.textChanged.connect(self._save_remote_settings)
-        self.remote_key_show_btn = QPushButton("👁")
+        self.remote_key_show_btn = QPushButton()
+        self.remote_key_show_btn.setObjectName("eyeButton")
         self.remote_key_show_btn.setCheckable(True)
-        self.remote_key_show_btn.setFixedWidth(36)
+        self.remote_key_show_btn.setFixedSize(36, 32)
+        self.remote_key_show_btn.setIconSize(QSize(20, 20))
+        self.remote_key_show_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.remote_key_show_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.remote_key_show_btn.setToolTip("顯示 / 隱藏金鑰")
         self.remote_key_show_btn.toggled.connect(self._toggle_key_visibility)
+        self._update_key_visibility_icon()
         key_help = _make_help_label("API 金鑰，儲存在本機 QSettings（明文）。自架且不需金鑰時可留空。")
         key_row = QHBoxLayout()
         key_row.addWidget(self.remote_key_edit)
@@ -463,19 +468,37 @@ class MainWindow(QMainWindow):
         self.remote_key_edit.setEchoMode(
             QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
         )
+        self._update_key_visibility_icon()
+
+    def _update_key_visibility_icon(self):
+        # 金鑰隱藏時顯示睜眼（點了可見），可見時顯示劃線眼（點了隱藏）
+        slashed = self.remote_key_show_btn.isChecked()
+        self.remote_key_show_btn.setIcon(eye_icon(self._theme_mode, slashed))
 
     def _load_remote_settings(self):
-        self.remote_url_edit.setText(self._settings.value("model/remote_base_url", "") or "")
-        self.remote_key_edit.setText(self._settings.value("model/remote_api_key", "") or "")
-        self.remote_model_edit.setText(self._settings.value("model/remote_model", "") or "")
+        # 先一次讀出所有值再寫入欄位：setText 會觸發 textChanged→_save_remote_settings，
+        # 若邊讀邊寫，第一個 setText 就會把尚未載入的欄位用空字串覆寫回 QSettings。
+        url = self._settings.value("model/remote_base_url", "") or ""
+        key = self._settings.value("model/remote_api_key", "") or ""
+        model = self._settings.value("model/remote_model", "") or ""
         mode = self._settings.value("model/backend_mode", "local") or "local"
-        if mode == "remote":
-            self.backend_remote_radio.setChecked(True)
-        else:
-            self.backend_local_radio.setChecked(True)
-        self._on_backend_mode_changed()
+
+        self._loading_settings = True
+        try:
+            self.remote_url_edit.setText(url)
+            self.remote_key_edit.setText(key)
+            self.remote_model_edit.setText(model)
+            if mode == "remote":
+                self.backend_remote_radio.setChecked(True)
+            else:
+                self.backend_local_radio.setChecked(True)
+            self._on_backend_mode_changed()
+        finally:
+            self._loading_settings = False
 
     def _save_remote_settings(self, *_):
+        if getattr(self, "_loading_settings", False):
+            return
         mode = "remote" if self.backend_remote_radio.isChecked() else "local"
         self._settings.setValue("model/backend_mode", mode)
         self._settings.setValue("model/remote_base_url", self.remote_url_edit.text().strip())
@@ -511,6 +534,7 @@ class MainWindow(QMainWindow):
         apply_theme(self._theme_mode)
         self._settings.setValue("ui/theme", self._theme_mode)
         self._update_theme_button()
+        self._update_key_visibility_icon()
 
     def _update_theme_button(self):
         # 顯示「點下去會切換成」的圖示
