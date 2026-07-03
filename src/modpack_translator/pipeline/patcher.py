@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import struct
 import zipfile
+import zlib
 from pathlib import Path
 from typing import Any
 
@@ -194,11 +196,17 @@ def _rewrite_jar(jar_path: Path, replacements: dict[str, bytes]) -> None:
         with zipfile.ZipFile(jar_path, "r") as src, zipfile.ZipFile(tmp_path, "w") as dst:
             infos = {info.filename: info for info in src.infolist()}
             replacement_paths = set(replacements)
+            written: set[str] = set()
 
             for info in src.infolist():
                 if info.filename in replacement_paths or _is_signature_file(info.filename):
                     continue
-                dst.writestr(_clone_zip_info(info), src.read(info.filename))
+                # 有些 jar（如 ars_nouveau）的 central directory 對同一 entry 有
+                # 多筆重複記錄，重寫時只保留第一筆
+                if info.filename in written:
+                    continue
+                written.add(info.filename)
+                dst.writestr(_clone_zip_info(info), _read_jar_entry(src, info))
 
             for path, data in replacements.items():
                 info = _clone_zip_info(infos[path], filename=path) if path in infos else _new_zip_info(path)
@@ -208,6 +216,39 @@ def _rewrite_jar(jar_path: Path, replacements: dict[str, bytes]) -> None:
     finally:
         if tmp_path.exists():
             tmp_path.unlink()
+
+
+def _read_jar_entry(src: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
+    """讀取 entry 內容，容忍重複 central directory 記錄。
+
+    多筆記錄指向同一個 local header 時，CPython 的 zip-bomb 防護會誤判
+    Overlapped entries 而拒讀；此時依 local header 直接讀原始位元組解壓，
+    並以 CRC 驗證資料完好。"""
+    try:
+        return src.read(info.filename)
+    except zipfile.BadZipFile:
+        data = _read_jar_entry_raw(src, info)
+        if zlib.crc32(data) & 0xFFFFFFFF != info.CRC:
+            raise
+        return data
+
+
+def _read_jar_entry_raw(src: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
+    fp = src.fp
+    fp.seek(info.header_offset)
+    header = fp.read(30)
+    if len(header) != 30 or header[:4] != b"PK\x03\x04":
+        raise zipfile.BadZipFile(f"Bad local header for {info.filename!r}")
+    name_len, extra_len = struct.unpack("<HH", header[26:30])
+    fp.seek(info.header_offset + 30 + name_len + extra_len)
+    payload = fp.read(info.compress_size)
+    if info.compress_type == zipfile.ZIP_STORED:
+        return payload
+    if info.compress_type == zipfile.ZIP_DEFLATED:
+        return zlib.decompress(payload, -15)
+    raise zipfile.BadZipFile(
+        f"Unsupported compression {info.compress_type} for {info.filename!r}"
+    )
 
 
 def _is_signature_file(path_in_jar: str) -> bool:

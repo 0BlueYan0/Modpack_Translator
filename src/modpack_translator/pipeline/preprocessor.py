@@ -10,6 +10,9 @@ from typing import Any
 # Single-pass regex: matches structural tokens that must be preserved via {N} encoding.
 # Minecraft color/format codes are markup, not words. Encoding them prevents cases like
 # "&ricon" being treated as one token and leaving "icon" untranslated.
+# $$var / $var / namespace:path / 巢狀 NBT 大括號也必須 token 化：這些結構常含
+# display、player 等一般單字，不編碼的話正確譯文會被漏翻檢查誤殺，而把結構
+# 翻譯掉的壞輸出反而通過（反向篩選）。
 _PLACEHOLDERS = re.compile(
     r'\$\([^)]*\)'                          # Patchouli: $(thing), $()
     r'|/\$'                                  # Patchouli shorthand close marker
@@ -18,9 +21,15 @@ _PLACEHOLDERS = re.compile(
     r'|\\?@[A-Z][A-Z0-9_]*@'                # legacy guide markers: @L@, \@L@, @PAGE@
     r'|\\n'                                 # escaped newline literal
     r'|\\&'                                 # escaped ampersand
-    r'|[&§][0-9A-FK-ORa-fk-or]'             # Minecraft color/format codes
+    r'|§[0-9A-Za-z]'                        # section codes incl. FancyMenu custom §x §z
+    r'|&[0-9A-FK-ORa-fk-or]'                # legacy ampersand color codes
     r'|%\d+\$[sdifcbxo%]'                  # positional: %1$s %2$d
     r'|%[sdifcbxo%]'                        # simple: %s %d %f
+    r'|\$\$?[A-Za-z_][A-Za-z0-9_]*(?:=<[^>]*>)?'  # FancyMenu $$var / Patchouli $var、$player=<name>
+    # 資源位置 namespace:path（小寫、無空白、path 不以 . 結尾）：minecraft:player、c:ores
+    r'|(?<![A-Za-z0-9_])[a-z_][a-z0-9_.-]*:[a-z_](?:[a-z0-9_./-]*[a-z0-9_/-])?'
+    # 巢狀 NBT 大括號的整段無空白字串塊：{ 與 { 之間不得有 }，確保只吃真巢狀
+    r'|\S*\{[^\s}]*\{\S*'
     r'|\{[^{}]+\}'                          # existing curly-brace placeholders
 )
 _STRUCTURAL_TEXT_RE = re.compile(
@@ -186,7 +195,8 @@ def _preserves_required_tokens(source: str, target: str) -> bool:
 
 def _is_soft_token(token: str) -> bool:
     # \& 只是跳脫的 & 符號；譯文改寫句子時捨棄它不影響可讀性
-    return bool(re.fullmatch(r"[&§][0-9A-FK-ORa-fk-or]|\\&", token))
+    # §x/§z 等 FancyMenu 自訂格式碼同屬裝飾性標記
+    return bool(re.fullmatch(r"§[0-9A-Za-z]|&[0-9A-FK-ORa-fk-or]|\\&", token))
 
 
 _QUEST_TITLE_KEY_RE = re.compile(

@@ -7,8 +7,8 @@ from modpack_translator.pipeline.preprocessor import decode, strip_preamble
 _PH_RE = re.compile(r"\{(\d+)\}")
 
 # 軟性 token：Minecraft 色碼 / 格式碼（裝飾性，遺失不影響結構正確性）
-# 例如：&b &r &6 §c §r &k &l &m &n &o
-_SOFT_TOKEN_RE = re.compile(r"^[&§][0-9a-fklmnorA-FKLMNOR]$")
+# 例如：&b &r &6 §c §r &k &l &m &n &o，以及 FancyMenu 自訂的 §x §z
+_SOFT_TOKEN_RE = re.compile(r"^(?:§[0-9A-Za-z]|&[0-9a-fklmnorA-FKLMNOR])$")
 
 
 def process(raw_translation: str, source_text: str, tokens: list[str]) -> tuple[str, bool]:
