@@ -385,14 +385,11 @@ Expected: FAIL，`assert p.exists()` 為 False
   "Storage Drawers": "儲物抽屜",
   "Iron Chests": "鐵箱子",
   "Quark": "夸克",
-  "Pam's HarvestCraft": "潘馬斯農場",
   "Astral Sorcery": "星輝魔法",
   "PneumaticCraft": "氣動工藝",
   "Alex's Mobs": "亞歷克斯的生物",
   "Supplementaries": "錦上添花",
   "Mystical Agriculture": "神秘農業",
-  "Refined Storage": "精緻儲存",
-  "Actually Additions": "實用拓展",
   "Aquaculture": "水產養殖",
   "The Aether": "天境",
   "Aether": "天境",
@@ -401,11 +398,8 @@ Expected: FAIL，`assert p.exists()` 為 False
   "Compact Machines": "緊湊機械",
   "EvilCraft": "邪惡工藝",
   "Extra Utilities": "更多實用設備",
-  "The Betweenlands": "交錯次元",
   "GregTech": "格雷科技",
-  "NuclearCraft": "核電工藝",
   "Environmental Tech": "環境科技",
-  "Integrated Dynamics": "集成動力",
   "Torchmaster": "火把大師",
   "Building Gadgets": "建築小工具",
   "Mining Gadgets": "採礦小工具",
@@ -424,7 +418,7 @@ Expected: 全部 PASS
 
 ```bash
 git add assets/glossary/modnames_zh_tw.json tests/test_glossary_merge.py
-git commit -m "feat: 預建常見模組名 zh_tw 對照表（初版 52 條，寧缺勿錯）"
+git commit -m "feat: 預建常見模組名 zh_tw 對照表（初版 46 條，寧缺勿錯）"
 ```
 
 ---
