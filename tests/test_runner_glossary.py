@@ -127,3 +127,18 @@ def test_existing_human_translation_untouched():
     result, *_ = translate_dict({"k": src}, {"k": human}, tr, {})
     assert "k" not in result
     assert tr.calls == []
+
+
+def test_normalize_cache_with_glossary():
+    from modpack_translator.pipeline.runner import normalize_cache_with_glossary
+    g = Glossary({"Twilight Forest": "暮光森林", "Create": "機械動力"})
+    cache = {
+        cache_key("Twilight Forest"): "Twilight Forest",  # 覆寫
+        cache_key("Create"): "機械動力",                    # 已一致，不動
+        cache_key("Other Text"): "其他譯文",                # 非詞彙槽位，不動
+    }
+    assert normalize_cache_with_glossary(cache, g) == 1
+    assert cache[cache_key("Twilight Forest")] == "暮光森林"
+    assert cache[cache_key("Other Text")] == "其他譯文"
+    assert normalize_cache_with_glossary(cache, g) == 0  # 冪等
+    assert normalize_cache_with_glossary(cache, None) == 0

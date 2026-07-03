@@ -59,6 +59,22 @@ def _enforce_glossary(glossary: Any, source: str, translated: str) -> str:
     return enforced
 
 
+def normalize_cache_with_glossary(cache: dict[str, str], glossary: Any) -> int:
+    """快取正規化：快取 key 是 sha256(原文) 不存原文，但用語庫的詞我們知道
+    原文——對每個詞算 cache_key 精準定位槽位，存在且不等於譯名就覆寫。
+    每輪執行時呼叫、冪等、零 API 成本；只動既存槽位，不注入新條目。
+    回傳覆寫條數。"""
+    if glossary is None:
+        return 0
+    changed = 0
+    for en, zh in glossary.terms.items():
+        ck = cache_key(en)
+        if ck in cache and cache[ck] != zh:
+            cache[ck] = zh
+            changed += 1
+    return changed
+
+
 # 用來偵測「有無可翻譯的真實字母內容」
 _HAS_LETTER_RE = re.compile(r"[A-Za-z]")
 _PATCHOULI_SEGMENT_SPLIT_RE = re.compile(r"(\$\((?:p|br2?|li\d*)\)|\\?@[A-Z][A-Z0-9_]*@)")
