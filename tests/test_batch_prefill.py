@@ -94,8 +94,9 @@ def _remote_cfg(**overrides) -> ModelConfig:
 
 
 def _mk_items(n):
+    # 每條給不同 group（真實情境：不同 key/檔各自成組），維持逐條獨立分批語義
     sources = [f"Collect some shiny stones number variant {i}" for i in range(n)]
-    return [bp.PrefillItem(source=s, ck=cache_key(s)) for s in sources]
+    return [bp.PrefillItem(source=s, ck=cache_key(s), group=f"g{i}") for i, s in enumerate(sources)]
 
 
 def _rate_limit_error(headers=None):
@@ -793,8 +794,8 @@ def test_run_prefill_batch_glossary_block_scoped_per_batch(monkeypatch):
     with_term = "Go to the Nether and return safely"
     without_term = "Collect many shiny stones for the mason"
     items = [
-        bp.PrefillItem(source=with_term, ck=cache_key(with_term)),
-        bp.PrefillItem(source=without_term, ck=cache_key(without_term)),
+        bp.PrefillItem(source=with_term, ck=cache_key(with_term), group="g0"),
+        bp.PrefillItem(source=without_term, ck=cache_key(without_term), group="g1"),
     ]
     cfg = _remote_cfg(remote_batch_size=1)  # 每批一條 → 各批只含自己命中的詞
     stats = bp.run_prefill(items, cfg, "sys", {}, glossary=g)

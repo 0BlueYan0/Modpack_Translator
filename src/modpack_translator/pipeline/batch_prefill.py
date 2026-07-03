@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import random
 import re
@@ -86,12 +87,27 @@ _BATCH_SUFFIX = (
 
 _PLACEHOLDER_RE = re.compile(r"\{[0-9]+\}")
 
+# FTB Quests lang 鍵前綴：quest.1A2B3C.title / .quest_desc[3] 等同屬一個任務
+_QUEST_GROUP_RE = re.compile(
+    r"^((?:chapter|chapter_group|quest|task|reward|reward_table|loot_crate|file)"
+    r"\.[0-9A-Fa-f]+)\."
+)
+
+
+def _group_id(target: "TranslationTarget", key: str) -> str:
+    """語義分組 id：任務類鍵以「檔案::quest.HEX」為組，其餘以檔案為組。
+    同組字串在 _build_batches 保證同批——批次本身就是鄰近語境。"""
+    m = _QUEST_GROUP_RE.match(key)
+    scope = m.group(1) if m else "__file__"
+    return f"{target.source_file}::{scope}"
+
 
 @dataclass(frozen=True)
 class PrefillItem:
     source: str  # 原始來源字串
     ck: str      # runner.cache_key(source)
     patchouli: bool = False  # 逐條救援時是否走 _translate_patchouli_text 階梯
+    group: str = ""          # 語義分組 id（同任務/同檔區塊同批，見 _build_batches）
 
 
 @dataclass
@@ -166,6 +182,7 @@ def collect_prefill_items(
             items.append(PrefillItem(
                 source=src, ck=ck,
                 patchouli=target.format == "patchouli_json",
+                group=_group_id(target, key),
             ))
     return items
 
@@ -175,21 +192,56 @@ def _build_batches(
     batch_size: int,
     char_budget: int = _BATCH_CHAR_BUDGET,
 ) -> list[list[_EncodedItem]]:
+    """語義分組分批：同組（同任務/同檔區塊）不拆批——批次本身就是鄰近語境，
+    模型一次看到整個任務的標題＋描述。一批可含多組（含跨檔）維持填充率。
+    目標大小 batch_size；為容納整組允許溢出至 4/3 倍（硬上限）；
+    單組超過硬上限或字元預算時退回逐條裝箱（拆組）。
+
+    先依 group 穩定排序恢復「同組相鄰」前提——collect_prefill_items 以
+    diff_keys（回傳 set，迭代順序不保證）走訪，同任務的 title/quest_desc[*]
+    在收集順序中並不相鄰；且 round-2 的 failed_multi 依完成順序收集亦非相鄰。
+    不排序則 itertools.groupby 會把同組切成多個 run，智慧分批形同失效。
+    Python sort 穩定，組內原始相對順序保留。"""
+    items = sorted(items, key=lambda it: it.group)
+    hard_cap = batch_size + max(1, batch_size // 3)
     batches: list[list[_EncodedItem]] = []
     current: list[_EncodedItem] = []
     current_chars = 0
-    for item in items:
-        encoded, tokens = encode(item.source)
-        if current and (
-            len(current) >= batch_size or current_chars + len(encoded) > char_budget
-        ):
+
+    def _close() -> None:
+        nonlocal current, current_chars
+        if current:
             batches.append(current)
             current = []
             current_chars = 0
-        current.append(_EncodedItem(item=item, encoded=encoded, tokens=tokens))
-        current_chars += len(encoded)
-    if current:
-        batches.append(current)
+
+    for _gid, group_iter in itertools.groupby(items, key=lambda it: it.group):
+        group: list[_EncodedItem] = []
+        group_chars = 0
+        for item in group_iter:
+            encoded, tokens = encode(item.source)
+            group.append(_EncodedItem(item=item, encoded=encoded, tokens=tokens))
+            group_chars += len(encoded)
+        if len(group) > hard_cap or group_chars > char_budget:
+            # 超大組：逐條裝箱（等同舊行為，組內順序仍相鄰）
+            for enc in group:
+                if current and (
+                    len(current) >= batch_size
+                    or current_chars + len(enc.encoded) > char_budget
+                ):
+                    _close()
+                current.append(enc)
+                current_chars += len(enc.encoded)
+            continue
+        if current and (
+            len(current) + len(group) > hard_cap
+            or current_chars + group_chars > char_budget
+            or len(current) >= batch_size
+        ):
+            _close()
+        current.extend(group)
+        current_chars += group_chars
+    _close()
     return batches
 
 
