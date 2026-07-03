@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from openai import OpenAI
 
@@ -13,6 +13,9 @@ from modpack_translator.pipeline._chat import (
     stream_chat,
 )
 from modpack_translator.pipeline.glossary import Glossary, augment_prompt
+
+if TYPE_CHECKING:
+    from modpack_translator.pipeline.pack_context import PackContext
 
 
 def resolve_remote_settings(cfg: ModelConfig) -> tuple[str, str, str]:
@@ -38,12 +41,14 @@ class RemoteTranslator:
 
     # 類別層級預設：測試以 __new__ 跳過 __init__ 時仍可安全讀取
     glossary: Glossary | None = None
+    pack_context: "PackContext | None" = None
 
     def __init__(
         self,
         cfg: ModelConfig,
         system_prompt: str,
         glossary: Glossary | None = None,
+        pack_context: "PackContext | None" = None,
     ) -> None:
         base_url, api_key, model = resolve_remote_settings(cfg)
 
@@ -51,6 +56,7 @@ class RemoteTranslator:
         self._model = model
         self._system_prompt = system_prompt
         self.glossary = glossary  # public：runner 以 getattr 取用做整串短路
+        self.pack_context = pack_context  # public：每包動態語境（injection-only）
         self._client = OpenAI(
             base_url=f"{normalize_base_url(base_url)}/v1",
             api_key=api_key or "not-needed",
@@ -62,7 +68,13 @@ class RemoteTranslator:
         return stream_chat(
             self._client,
             self._model,
-            augment_prompt(self._system_prompt, self.glossary, [text]),
+            augment_prompt(
+                self._system_prompt, self.glossary, [text],
+                context_glossary=(
+                    self.pack_context.learned_glossary()
+                    if self.pack_context is not None else None
+                ),
+            ),
             text,
             max_tokens=self._cfg.max_tokens,
             temperature=self._cfg.temperature,

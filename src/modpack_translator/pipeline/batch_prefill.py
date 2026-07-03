@@ -21,7 +21,10 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
+
+if TYPE_CHECKING:
+    from modpack_translator.pipeline.pack_context import PackContext
 
 import httpx
 from openai import (
@@ -42,6 +45,8 @@ from modpack_translator.pipeline.glossary import (
     _BATCH_TERM_CAP,
     Glossary,
     augment_prompt,
+    format_block,
+    merged_match_pairs,
 )
 from modpack_translator.pipeline.postprocessor import process
 from modpack_translator.pipeline.preprocessor import (
@@ -373,13 +378,18 @@ def _process_batch(
     cancel_event: threading.Event,
     _sleep: Callable[[float], None],
     glossary: Glossary | None = None,
+    pack_context: "PackContext | None" = None,
 ) -> _BatchResult:
     """worker thread 進入點：請求 → 解析（不可解析時重送一次）→ 逐條驗證。"""
     try:
         max_tokens = _batch_max_tokens(batch)
-        glossary_block = "" if glossary is None else glossary.format_block(
-            glossary.match_terms(enc.encoded for enc in batch), cap=_BATCH_TERM_CAP
+        context_glossary = (
+            pack_context.learned_glossary() if pack_context is not None else None
         )
+        pairs = merged_match_pairs(
+            (glossary, context_glossary), (enc.encoded for enc in batch)
+        )
+        glossary_block = format_block(pairs, cap=_BATCH_TERM_CAP)
         mapping: dict[int, str] = {}
         unparseable = False
         for _parse_attempt in (0, 1):
@@ -433,6 +443,7 @@ class _RescueTranslator:
         cancel_event: threading.Event,
         _sleep: Callable[[float], None],
         glossary: Glossary | None = None,
+        pack_context: "PackContext | None" = None,
     ) -> None:
         self._client = client
         self._cfg = cfg
@@ -441,14 +452,20 @@ class _RescueTranslator:
         self._cancel_event = cancel_event
         self._sleep = _sleep
         self.glossary = glossary  # public：runner 的短路 hook 以 getattr 取用
+        self.pack_context = pack_context  # public：每包動態語境（injection-only）
 
     def translate(self, text: str, cancel_check: Callable[[], bool] | None = None) -> str:
+        context_glossary = (
+            self.pack_context.learned_glossary() if self.pack_context is not None else None
+        )
         raw = _stream_with_backoff(
             self._client,
             self._cfg,
             self._model,
             [
-                {"role": "system", "content": augment_prompt(self._system_prompt, self.glossary, [text])},
+                {"role": "system", "content": augment_prompt(
+                    self._system_prompt, self.glossary, [text], context_glossary=context_glossary
+                )},
                 {"role": "user", "content": text},
             ],
             self._cfg.max_tokens,
@@ -493,6 +510,7 @@ class _RunContext:
     flush_cache: Callable[[], None] | None
     sleep: Callable[[float], None]
     glossary: Glossary | None = None
+    pack_context: "PackContext | None" = None
     resolved: int = 0
     since_flush: int = 0
     errors_logged: int = 0
@@ -538,7 +556,7 @@ def _run_batches(
     futures = [
         pool.submit(
             _process_batch, ctx.client, ctx.cfg, ctx.model, ctx.system_prompt,
-            batch, ctx.cancel_event, ctx.sleep, ctx.glossary,
+            batch, ctx.cancel_event, ctx.sleep, ctx.glossary, ctx.pack_context,
         )
         for batch in batches
     ]
@@ -577,7 +595,7 @@ def _run_rescue_round(
     """第 3 輪：逐條併發救援，結果直接最終落定（成功寫快取／失敗計 failed）。"""
     translator = _RescueTranslator(
         ctx.client, ctx.cfg, ctx.model, ctx.system_prompt, ctx.cancel_event, ctx.sleep,
-        ctx.glossary,
+        ctx.glossary, ctx.pack_context,
     )
     futures = [
         pool.submit(_rescue_item, translator, item, retry_count, ctx.cancel_event)
@@ -609,6 +627,7 @@ def run_prefill(
     on_log: Callable[[str], None] | None = None,
     flush_cache: Callable[[], None] | None = None,
     glossary: Glossary | None = None,
+    pack_context: "PackContext | None" = None,
     _sleep: Callable[[float], None] = time.sleep,
 ) -> PrefillStats:
     """三輪收斂翻譯 items：批次 → 縮小批次重試 → 併發逐條救援。
@@ -646,7 +665,7 @@ def run_prefill(
         cache=cache, stats=stats, total=len(items),
         cancel_event=threading.Event(), cancel_check=cancel_check,
         on_progress=on_progress, on_log=on_log, flush_cache=flush_cache,
-        sleep=_sleep, glossary=glossary,
+        sleep=_sleep, glossary=glossary, pack_context=pack_context,
     )
     pool = ThreadPoolExecutor(max_workers=cfg.remote_concurrency)
     try:
@@ -701,6 +720,7 @@ def prefill_translation_cache(
     on_log: Callable[[str], None] | None = None,
     flush_cache: Callable[[], None] | None = None,
     glossary: Glossary | None = None,
+    pack_context: "PackContext | None" = None,
     _sleep: Callable[[float], None] = time.sleep,
 ) -> PrefillStats:
     """GUI 與 CLI 共用的入口：remote 模式且開關開啟才收集並執行預翻譯。"""
@@ -723,6 +743,7 @@ def prefill_translation_cache(
         on_log=on_log,
         flush_cache=flush_cache,
         glossary=glossary,
+        pack_context=pack_context,
         _sleep=_sleep,
     )
     elapsed = time.monotonic() - start
