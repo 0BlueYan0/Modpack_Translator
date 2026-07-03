@@ -425,6 +425,19 @@ class MainWindow(QMainWindow):
         checkbox_row.addWidget(QLabel("重試次數："))
         checkbox_row.addWidget(self.retry_spin)
         checkbox_row.addWidget(retry_help)
+        checkbox_row.addSpacing(16)
+        self.context_btn = QPushButton("翻譯語境…")
+        # 用 minimumWidth 而非 fixedWidth：狀態會換成較長的「翻譯語境…（已設定）」，
+        # 固定 120px 會截斷末尾的「（已設定）」使狀態指示失效。
+        self.context_btn.setMinimumWidth(120)
+        self.context_btn.setEnabled(False)
+        self.context_btn.clicked.connect(self._open_context_dialog)
+        context_help = _make_help_label(
+            "描述此包的題材/語氣讓譯文更貼切；並記住此包翻譯過的譯法，\n"
+            "下次翻譯沿用（存於包內 .modpack_translator/，跟著包走）。"
+        )
+        checkbox_row.addWidget(self.context_btn)
+        checkbox_row.addWidget(context_help)
         checkbox_row.addStretch()
 
         glossary_row = QHBoxLayout()
@@ -900,6 +913,40 @@ class MainWindow(QMainWindow):
 
         CustomGlossaryDialog(self).exec()
 
+    def _resolved_game_root(self):
+        from modpack_translator.pipeline.scanner import resolve_game_root
+
+        text = self.modpack_edit.text().strip()
+        if not text:
+            return None
+        root = Path(text)
+        if not root.is_dir():
+            return None
+        try:
+            return resolve_game_root(root)
+        except Exception:
+            return None
+
+    def _update_context_btn(self):
+        game_root = self._resolved_game_root()
+        self.context_btn.setEnabled(game_root is not None)
+        label = "翻譯語境…"
+        if game_root is not None:
+            from modpack_translator.pipeline.pack_context import load_pack_context
+
+            if load_pack_context(game_root).extra_prompt.strip():
+                label = "翻譯語境…（已設定）"
+        self.context_btn.setText(label)
+
+    def _open_context_dialog(self):
+        game_root = self._resolved_game_root()
+        if game_root is None:
+            return
+        from modpack_translator.gui.context_dialog import ContextDialog
+
+        ContextDialog(game_root, self).exec()
+        self._update_context_btn()
+
     def _set_busy(self, busy: bool):
         self.scan_btn.setEnabled(not busy)
         if not busy:
@@ -1212,6 +1259,7 @@ class MainWindow(QMainWindow):
             self.translate_btn.setText("▶  開始翻譯")
             self._set_tone(self.translate_btn, "")
             self._set_accent("blue")
+        self._update_context_btn()
 
     def closeEvent(self, event):
         if self._translate_worker and self._translate_worker.isRunning():
