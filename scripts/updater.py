@@ -21,6 +21,12 @@ UPDATE_DIR = RUNTIME_DIR / "updates"
 UPDATE_STATE = RUNTIME_DIR / "update_state.json"
 BACKUP_DIR = RUNTIME_DIR / "update_backup"
 FINALIZE_SCRIPT = RUNTIME_DIR / "finalize_update"
+FINALIZE_PID_FILE = RUNTIME_DIR / "finalize_update.pid"
+
+# 交接空窗：apply 程序寫入自身 PID 後結束，到 finalize 腳本改寫成
+# 自己的 PID 之間（PowerShell 冷啟動可達數秒），檔案裡是死 PID；
+# 檔案夠新時仍視為進行中。
+_FINALIZE_HANDOFF_GRACE = 30.0
 
 GITHUB_REPO = "0BlueYan0/Modpack_Translator"
 RELEASE_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -93,6 +99,52 @@ def _wait_for_pid_exit(pid: int, timeout: float = 60.0) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline and _pid_alive(pid):
         time.sleep(0.3)
+
+
+def finalize_in_progress() -> bool:
+    """finalize（刪 .venv → 重跑 setup）是否仍在執行。
+
+    GUI 與 apply 都以此擋住並行更新：兩份 finalize 同時動 .venv 會把環境
+    刪成半殘（pyvenv.cfg 沒了但 python.exe 還在），之後 uv sync 永遠死在
+    "No pyvenv.cfg file"，重跑 setup 也救不回來。
+    """
+    try:
+        raw = FINALIZE_PID_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    try:
+        pid = int(raw)
+    except ValueError:
+        pid = -1
+    if pid > 0 and _pid_alive(pid):
+        return True
+    try:
+        if time.time() - FINALIZE_PID_FILE.stat().st_mtime < _FINALIZE_HANDOFF_GRACE:
+            return True
+        # 過期殘留（finalize 曾異常中斷）：清掉，避免永遠擋住更新
+        FINALIZE_PID_FILE.unlink()
+    except OSError:
+        pass
+    return False
+
+
+def _wait_for_finalize(timeout: float = 1200.0, poll: float = 1.0) -> None:
+    """等待其他 finalize 結束；逾時拋錯而不是硬上。
+
+    timeout 預設 20 分鐘：finalize 的 setup 階段要下載後端 wheel（可達數百 MB），
+    慢網路下十幾分鐘是正常的。
+    """
+    deadline = time.time() + timeout
+    logged = False
+    while finalize_in_progress():
+        if not logged:
+            _log("another update finalize is running; waiting for it to finish")
+            logged = True
+        if time.time() >= deadline:
+            message = "前一次更新的環境安裝仍在進行，已中止本次套用以免互相破壞安裝。"
+            _log(f"abort: {message}")
+            raise RuntimeError(message)
+        time.sleep(poll)
 
 
 @dataclass(frozen=True)
@@ -420,34 +472,65 @@ def _copy_tree_contents(src_root: Path, dest_root: Path, preserve: bool = True) 
 
 def _write_finalize_script(restart: bool) -> Path:
     current_pid = os.getpid()
+    FINALIZE_SCRIPT.parent.mkdir(parents=True, exist_ok=True)
     if os.name == "nt":
         script = FINALIZE_SCRIPT.with_suffix(".ps1")
         script.write_text(
             f"""
 $ErrorActionPreference = "Continue"
-while (Get-Process -Id {current_pid} -ErrorAction SilentlyContinue) {{
-    Start-Sleep -Milliseconds 300
-}}
 Set-Location -LiteralPath {str(PROJECT_ROOT)!r}
-$log = ".runtime\\updater.log"
-Add-Content -Path $log -Value "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] finalize: cleaning old environment"
-if (Test-Path -LiteralPath ".venv") {{
-    Remove-Item -LiteralPath ".venv" -Recurse -Force -ErrorAction SilentlyContinue
-}}
-Remove-Item -LiteralPath ".runtime\\backend.json" -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath ".runtime\\llama-server.log" -Force -ErrorAction SilentlyContinue
-if (Test-Path -LiteralPath ".runtime\\llama_cpp_amd") {{
-    Remove-Item -LiteralPath ".runtime\\llama_cpp_amd" -Recurse -Force -ErrorAction SilentlyContinue
-}}
-if (Test-Path -LiteralPath ".runtime\\downloads") {{
-    Remove-Item -LiteralPath ".runtime\\downloads" -Recurse -Force -ErrorAction SilentlyContinue
-}}
-Add-Content -Path $log -Value "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] finalize: running setup"
-& ".\\setup_windows.bat" *>> $log
-Add-Content -Path $log -Value "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] finalize: setup exit code $LASTEXITCODE"
-if ($LASTEXITCODE -eq 0 -and ${str(bool(restart)).lower()}) {{
-    Add-Content -Path $log -Value "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] finalize: restarting app"
-    Start-Process -FilePath "uv" -ArgumentList @("run", "python", "main.py") -WorkingDirectory {str(PROJECT_ROOT)!r} -WindowStyle Hidden
+$pidFile = ".runtime\\finalize_update.pid"
+# 接手 apply 程序寫入的佔位 PID，讓 finalize_in_progress 擋住並行更新
+Set-Content -LiteralPath $pidFile -Value $PID
+try {{
+    while (Get-Process -Id {current_pid} -ErrorAction SilentlyContinue) {{
+        Start-Sleep -Milliseconds 300
+    }}
+    $log = ".runtime\\updater.log"
+    Add-Content -Path $log -Value "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] finalize: cleaning old environment"
+    # 先前 finalize 中斷留下的待刪目錄
+    Get-ChildItem -LiteralPath "." -Filter ".venv.delete-*" -Directory -Force -ErrorAction SilentlyContinue |
+        ForEach-Object {{ Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }}
+    # 直接遞迴刪除 .venv 遇檔案鎖會半刪（pyvenv.cfg 沒了、python.exe 還在），
+    # 之後 uv sync 永遠死在 "No pyvenv.cfg file"。整個目錄改名成功才刪；
+    # 改不動代表還有程序佔用，保留完整可用的 .venv 讓 uv sync 就地調和。
+    if (Test-Path -LiteralPath ".venv") {{
+        $renamed = $false
+        foreach ($i in 1..10) {{
+            try {{
+                Rename-Item -LiteralPath ".venv" -NewName ".venv.delete-$PID" -ErrorAction Stop
+                $renamed = $true
+                break
+            }} catch {{
+                Start-Sleep -Seconds 2
+            }}
+        }}
+        if ($renamed) {{
+            Remove-Item -LiteralPath ".venv.delete-$PID" -Recurse -Force -ErrorAction SilentlyContinue
+        }} else {{
+            Add-Content -Path $log -Value "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] finalize: .venv is locked, keeping it for uv sync to reconcile"
+        }}
+    }}
+    Remove-Item -LiteralPath ".runtime\\backend.json" -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath ".runtime\\llama-server.log" -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath ".runtime\\llama_cpp_amd") {{
+        Remove-Item -LiteralPath ".runtime\\llama_cpp_amd" -Recurse -Force -ErrorAction SilentlyContinue
+    }}
+    if (Test-Path -LiteralPath ".runtime\\downloads") {{
+        Remove-Item -LiteralPath ".runtime\\downloads" -Recurse -Force -ErrorAction SilentlyContinue
+    }}
+    Add-Content -Path $log -Value "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] finalize: running setup"
+    & ".\\setup_windows.bat" *>> $log
+    Add-Content -Path $log -Value "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] finalize: setup exit code $LASTEXITCODE"
+    if ($LASTEXITCODE -eq 0 -and ${str(bool(restart)).lower()}) {{
+        Add-Content -Path $log -Value "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] finalize: restarting app"
+        Start-Process -FilePath "uv" -ArgumentList @("run", "python", "main.py") -WorkingDirectory {str(PROJECT_ROOT)!r} -WindowStyle Hidden
+    }}
+}} finally {{
+    # 只清自己的 PID 檔：若已被下一個更新接手改寫，不能誤刪別人的鎖
+    if ((Get-Content -LiteralPath $pidFile -ErrorAction SilentlyContinue) -eq "$PID") {{
+        Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
+    }}
 }}
 """.lstrip(),
             # utf-8-sig：Windows PowerShell 5.1 讀無 BOM 檔會用 ANSI 代碼頁，
@@ -459,13 +542,29 @@ if ($LASTEXITCODE -eq 0 -and ${str(bool(restart)).lower()}) {{
     script = FINALIZE_SCRIPT.with_suffix(".sh")
     script.write_text(
         f"""#!/usr/bin/env sh
+cd {str(PROJECT_ROOT)!r} || exit 1
+pid_file=".runtime/finalize_update.pid"
+# 接手 apply 程序寫入的佔位 PID，讓 finalize_in_progress 擋住並行更新
+echo $$ > "$pid_file"
+cleanup() {{
+  # 只清自己的 PID 檔：若已被下一個更新接手改寫，不能誤刪別人的鎖
+  if [ "$(cat "$pid_file" 2>/dev/null)" = "$$" ]; then rm -f "$pid_file"; fi
+}}
+trap cleanup EXIT
 while kill -0 {current_pid} 2>/dev/null; do
   sleep 0.3
 done
-cd {str(PROJECT_ROOT)!r} || exit 1
 log=".runtime/updater.log"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] finalize: cleaning old environment" >> "$log"
-rm -rf .venv
+rm -rf .venv.delete-* 2>/dev/null || true
+# 改名成功才刪；改不動代表還有程序佔用，保留完整 .venv 讓 uv sync 就地調和
+if [ -d .venv ]; then
+  if mv .venv ".venv.delete-$$" 2>/dev/null; then
+    rm -rf ".venv.delete-$$"
+  else
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] finalize: .venv busy, keeping it for uv sync" >> "$log"
+  fi
+fi
 rm -f .runtime/backend.json .runtime/llama-server.log
 rm -rf .runtime/llama_cpp_amd .runtime/downloads
 chmod +x ./setup_unix.sh 2>/dev/null || true
@@ -487,6 +586,10 @@ exit "$status"
 
 def _launch_finalize_script(restart: bool) -> None:
     script = _write_finalize_script(restart)
+    # 先寫入自身 PID 佔位：apply 結束到腳本接手改寫之間的空窗，
+    # 由 finalize_in_progress 的檔案 mtime 寬限期蓋住
+    FINALIZE_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    FINALIZE_PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
     if os.name == "nt":
         subprocess.Popen(
             [
@@ -526,8 +629,16 @@ def apply_update(
 
     _log(f"apply start: {zip_path.name}")
     if wait_pid:
-        _wait_for_pid_exit(wait_pid)
+        _wait_for_pid_exit(wait_pid, timeout=300.0)
+        if _pid_alive(wait_pid):
+            # 從活著的程序腳下換檔案 / 刪 .venv 會把安裝弄成半殘
+            message = f"主程式（PID {wait_pid}）仍在執行，已中止更新以免損壞安裝。"
+            _log(f"abort: {message}")
+            raise RuntimeError(message)
         _log(f"gui process {wait_pid} exited")
+
+    # 使用者可能重開程式又點了一次更新：等前一個 finalize 收工再動檔案
+    _wait_for_finalize()
 
     apply_dir = UPDATE_DIR / "apply"
     if apply_dir.exists():

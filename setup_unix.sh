@@ -8,6 +8,14 @@ fi
 
 echo "正在同步 Python 環境..."
 uv python install 3.12
+
+# 自癒：.venv 存在但缺 pyvenv.cfg（更新中斷留下的半殘環境），
+# uv sync 會死在 "No pyvenv.cfg file" 且不會自行重建，必須先整個移除
+if [ -d .venv ] && [ ! -f .venv/pyvenv.cfg ]; then
+    echo "偵測到損壞的 Python 環境（缺 pyvenv.cfg），正在移除重建..."
+    rm -rf .venv
+fi
+
 uv sync --managed-python --python 3.12 --inexact --no-install-package llama-cpp-python
 
 echo "正在偵測硬體並初始化本機模型後端..."

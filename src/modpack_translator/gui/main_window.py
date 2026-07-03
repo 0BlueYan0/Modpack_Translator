@@ -45,6 +45,7 @@ from scripts.updater import (
     UpdateInfo,
     check_for_update,
     download_update,
+    finalize_in_progress,
     launch_apply_update,
 )
 
@@ -692,7 +693,9 @@ class MainWindow(QMainWindow):
             f"{notes or '此版本沒有 release notes。'}\n\n"
             "是否下載並直接更新？程式會關閉，移除舊的虛擬環境與後端設定，"
             "重新執行 setup，完成後再啟動新版。\n"
-            "已下載的模型、翻譯快取（outputs/）與 API 設定都會保留。"
+            "已下載的模型、翻譯快取（outputs/）與 API 設定都會保留。\n\n"
+            "⚠ 安裝需要數分鐘（會在背景重建環境）。期間請勿重新開啟程式"
+            "或再次執行更新，完成後新版會自動啟動。"
         )
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Information)
@@ -709,6 +712,15 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "無法更新", "翻譯進行中不能更新。請先停止翻譯。")
             return
         if self._update_download_worker and self._update_download_worker.isRunning():
+            return
+        if finalize_in_progress():
+            # 兩份 finalize 同時動 .venv 會把環境刪成半殘，之後 setup 永遠失敗
+            QMessageBox.warning(
+                self,
+                "無法更新",
+                "上一次更新仍在背景安裝環境中（可能需要數分鐘）。\n"
+                "請等它完成後再試；進度可查看 .runtime\\updater.log。",
+            )
             return
 
         self.update_btn.setEnabled(False)

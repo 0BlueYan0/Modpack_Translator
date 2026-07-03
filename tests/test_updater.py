@@ -551,6 +551,150 @@ def test_pid_helpers(monkeypatch):
     assert updater.time.time() - start < 2.0
 
 
+# ────────────────────────────────────────────── 並行更新防護 / finalize 互斥
+
+
+@pytest.fixture
+def pid_env(monkeypatch, tmp_path):
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    pid_file = runtime / "finalize_update.pid"
+    monkeypatch.setattr(updater, "RUNTIME_DIR", runtime)
+    monkeypatch.setattr(updater, "FINALIZE_PID_FILE", pid_file)
+    return pid_file
+
+
+def test_finalize_in_progress_false_without_pid_file(pid_env):
+    assert updater.finalize_in_progress() is False
+
+
+def test_finalize_in_progress_true_for_live_pid(pid_env):
+    import os as _os
+
+    pid_env.write_text(str(_os.getpid()), encoding="utf-8")
+    assert updater.finalize_in_progress() is True
+
+
+def test_finalize_in_progress_grace_period_for_fresh_dead_pid(pid_env):
+    # 交接空窗：apply 程序寫入自身 PID 後結束，finalize 腳本還沒接手改寫。
+    # 檔案夠新時就算 PID 已死也要視為進行中，否則第二個更新會趁隙動 .venv
+    pid_env.write_text(str(0x7FFFFFF), encoding="utf-8")
+    assert updater.finalize_in_progress() is True
+
+
+def test_finalize_in_progress_stale_dead_pid_cleaned(pid_env):
+    import os as _os
+
+    pid_env.write_text(str(0x7FFFFFF), encoding="utf-8")
+    old = updater.time.time() - 3600
+    _os.utime(pid_env, (old, old))
+    assert updater.finalize_in_progress() is False
+    # 過期殘留要清掉，否則之後永遠擋住更新
+    assert not pid_env.exists()
+
+
+def test_wait_for_finalize_times_out(monkeypatch, pid_env):
+    monkeypatch.setattr(updater, "finalize_in_progress", lambda: True)
+    with pytest.raises(RuntimeError):
+        updater._wait_for_finalize(timeout=0.2, poll=0.05)
+
+
+def test_wait_for_finalize_returns_when_clear(monkeypatch, pid_env):
+    monkeypatch.setattr(updater, "finalize_in_progress", lambda: False)
+    updater._wait_for_finalize(timeout=0.2, poll=0.05)  # 不應拋錯
+
+
+def _guard_project(monkeypatch, tmp_path) -> Path:
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "main.py").write_text("old main", encoding="utf-8")
+    runtime = project / ".runtime"
+    monkeypatch.setattr(updater, "PROJECT_ROOT", project)
+    monkeypatch.setattr(updater, "RUNTIME_DIR", runtime)
+    monkeypatch.setattr(updater, "UPDATE_DIR", runtime / "updates")
+    monkeypatch.setattr(updater, "UPDATE_STATE", runtime / "update_state.json")
+    monkeypatch.setattr(updater, "BACKUP_DIR", runtime / "update_backup")
+    monkeypatch.setattr(updater, "FINALIZE_PID_FILE", runtime / "finalize_update.pid")
+    return project
+
+
+def _guard_zip(tmp_path) -> Path:
+    zip_path = tmp_path / "u.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("Modpack_Translator-v9.9.9/main.py", "new main")
+    return zip_path
+
+
+def test_apply_update_aborts_when_gui_never_exits(monkeypatch, tmp_path):
+    """GUI 超時仍未退出就動檔案，會把 .venv 從活著的程序腳下刪成半殘。"""
+    project = _guard_project(monkeypatch, tmp_path)
+    zip_path = _guard_zip(tmp_path)
+    monkeypatch.setattr(updater, "_wait_for_pid_exit", lambda pid, timeout=60.0: None)
+    monkeypatch.setattr(updater, "_pid_alive", lambda pid: True)
+
+    with pytest.raises(RuntimeError, match="仍在執行"):
+        updater.apply_update(
+            zip_path, restart=False, refresh_environment=False, wait_pid=12345
+        )
+    assert (project / "main.py").read_text(encoding="utf-8") == "old main"
+
+
+def test_apply_update_waits_for_other_finalize_before_touching_files(monkeypatch, tmp_path):
+    """使用者重開舊程式再點一次更新：第二個 apply 必須等第一個 finalize 結束。"""
+    project = _guard_project(monkeypatch, tmp_path)
+    zip_path = _guard_zip(tmp_path)
+
+    def _always_busy(*args, **kwargs):
+        raise RuntimeError("前一次更新的環境安裝仍在進行")
+
+    monkeypatch.setattr(updater, "_wait_for_finalize", _always_busy)
+
+    with pytest.raises(RuntimeError, match="前一次"):
+        updater.apply_update(zip_path, restart=False, refresh_environment=False)
+    assert (project / "main.py").read_text(encoding="utf-8") == "old main"
+
+
+def test_launch_finalize_writes_pid_placeholder(monkeypatch, tmp_path):
+    import os as _os
+
+    runtime = tmp_path / ".runtime"
+    pid_file = runtime / "finalize_update.pid"
+    monkeypatch.setattr(updater, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(updater, "RUNTIME_DIR", runtime)
+    monkeypatch.setattr(updater, "FINALIZE_PID_FILE", pid_file)
+    monkeypatch.setattr(updater, "FINALIZE_SCRIPT", runtime / "finalize_update")
+    monkeypatch.setattr(updater.subprocess, "Popen", lambda *a, **k: None)
+
+    updater._launch_finalize_script(restart=False)
+    assert pid_file.read_text(encoding="utf-8").strip() == str(_os.getpid())
+
+
+def test_finalize_ps1_safe_venv_removal_and_pid_lifecycle(monkeypatch, tmp_path):
+    if updater.os.name != "nt":
+        pytest.skip("Windows-only finalize script")
+    monkeypatch.setattr(updater, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(updater, "FINALIZE_SCRIPT", tmp_path / "finalize_update")
+    script = updater._write_finalize_script(restart=True)
+    text = script.read_bytes().decode("utf-8-sig")
+    # 腳本必須接手 PID 檔並在結束時清掉自己的（且只清自己的）
+    assert "finalize_update.pid" in text
+    # 直接遞迴刪除 .venv 遇檔案鎖會半刪（pyvenv.cfg 沒了、python.exe 還在），
+    # 之後 uv sync 永遠死在 "No pyvenv.cfg file"；必須整個改名成功才刪，
+    # 改不動就保留完整 venv 交給 uv sync 就地調和
+    assert "Rename-Item" in text
+    assert ".venv.delete-" in text
+
+
+def test_finalize_sh_safe_venv_removal_and_pid_lifecycle(monkeypatch, tmp_path):
+    monkeypatch.setattr(updater.os, "name", "posix")
+    monkeypatch.setattr(updater, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(updater, "FINALIZE_SCRIPT", tmp_path / "finalize_update")
+    script = updater._write_finalize_script(restart=True)
+    text = script.read_text(encoding="utf-8")
+    assert "finalize_update.pid" in text
+    assert ".venv.delete-" in text
+
+
 def test_apply_update_rejects_unsafe_zip(monkeypatch, tmp_path):
     project = tmp_path / "project"
     project.mkdir()
