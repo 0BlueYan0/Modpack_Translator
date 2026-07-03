@@ -122,7 +122,7 @@ class TranslateWorker(QThread):
     progress     = Signal(int, int, str, str, int) # current_idx, total, mod_id, format, pairs_done_so_far
     pair_progress = Signal(int)               # 每條字串完成後：累計已處理對數
     prefill_progress = Signal(int, int)       # 批次預翻譯：已完成/總數（去重後字串）
-    finished     = Signal(int, int, int, int) # translated, cached, fallback, failed_files
+    finished     = Signal(int, int, int, int, int) # translated, cached, fallback, failed_files, prefill_translated
     error    = Signal(str)
 
     def __init__(
@@ -194,8 +194,10 @@ class TranslateWorker(QThread):
 
                 # 遠端模式：先把所有待翻字串批次併發翻進快取（三輪收斂），
                 # 之後逐檔階段幾乎全是快取命中；極少數殘餘走既有逐條分段重試。
+                # 預翻譯成功數是本輪真實 API 消耗的主體，須併入結尾統計。
+                prefill_translated = 0
                 if self._cfg.model.backend_mode == "remote" and self._cfg.model.remote_prefill:
-                    prefill_translation_cache(
+                    prefill_stats = prefill_translation_cache(
                         self._targets,
                         self._cfg.model,
                         self._cfg.language.system_prompt,
@@ -208,6 +210,7 @@ class TranslateWorker(QThread):
                         flush_cache=lambda: _flush_cache(cache_path, cache),
                         glossary=glossary,
                     )
+                    prefill_translated = prefill_stats.translated
                     _flush_cache(cache_path, cache)
 
                 # 每條字串完成後觸發：更新累計數並節流發送信號（每 0.5 秒最多 1 次）
@@ -265,7 +268,10 @@ class TranslateWorker(QThread):
                         f"詳見 Failed Items/ 資料夾。"
                     )
 
-                self.finished.emit(total_translated, total_cached, total_fallback, failed_files_written)
+                self.finished.emit(
+                    total_translated, total_cached, total_fallback,
+                    failed_files_written, prefill_translated,
+                )
             finally:
                 translator.close()
                 self._translator = None

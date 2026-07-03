@@ -37,7 +37,7 @@ from modpack_translator.config import load_config
 from modpack_translator.gui.theme import apply_theme, eye_icon, restyle
 from modpack_translator.pipeline.glossary import available_glossaries
 from modpack_translator.gui.worker import ScanWorker, TranslateWorker
-from modpack_translator.gui.stats import build_stats_text
+from modpack_translator.gui.stats import build_stats_text, build_summary_lines
 from modpack_translator.version import APP_NAME, APP_VERSION, __version__
 from scripts.updater import (
     RELEASES_URL,
@@ -1070,7 +1070,10 @@ class MainWindow(QMainWindow):
         # 進度條以字串對數平滑推進；clamp 防止估算差異造成超出 maximum
         self.progress_bar.setValue(min(pairs_done, self.progress_bar.maximum()))
 
-    def _on_translate_finished(self, translated: int, cached: int, fallback: int, failed_files: int):
+    def _on_translate_finished(
+        self, translated: int, cached: int, fallback: int,
+        failed_files: int, prefill_translated: int,
+    ):
         self._stats_timer.stop()
         self._force_stop_timer.stop()
         self._update_stats_label()
@@ -1083,24 +1086,17 @@ class MainWindow(QMainWindow):
             self._set_accent("orange")
             self.translate_btn.setText("↩  已停止，繼續？")
             self._set_tone(self.translate_btn, "warning")
-            summary_lines += [
-                "翻譯已中止",
-                f"  已翻譯：{translated:,} 組",
-                f"  快取命中：{cached:,} 組",
-                f"  回退（使用原文）：{fallback:,} 組",
-            ]
         else:
             self.progress_bar.setValue(self.progress_bar.maximum())
             self._set_accent("green")
             self.translate_btn.setText("✓  完成")
             self._set_tone(self.translate_btn, "success")
             self._translated_modpack_path = self.modpack_edit.text().strip()
-            summary_lines += [
-                "翻譯完成",
-                f"  已翻譯：{translated:,} 組",
-                f"  快取命中：{cached:,} 組",
-                f"  回退（使用原文）：{fallback:,} 組",
-            ]
+
+        summary_lines += build_summary_lines(
+            self._translation_cancelled, prefill_translated,
+            translated, cached, fallback,
+        )
 
         if failed_files > 0:
             summary_lines.append(

@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from modpack_translator.config import load_config
+from modpack_translator.gui.stats import build_summary_lines
 from modpack_translator.pipeline.batch_prefill import prefill_translation_cache
 from modpack_translator.pipeline.glossary import load_glossary
 from modpack_translator.pipeline.patcher import (
@@ -239,7 +240,9 @@ def main():
         cache_dirty = 0
         failed_by_target: dict[str, dict[str, str]] = {}
 
-        # 遠端模式：先把所有待翻字串批次併發翻進快取，逐檔階段幾乎全快取命中
+        # 遠端模式：先把所有待翻字串批次併發翻進快取，逐檔階段幾乎全快取命中；
+        # 預翻譯成功數是本輪真實 API 消耗的主體，須併入結尾統計
+        prefill_translated = 0
         if cfg.model.backend_mode == "remote" and cfg.model.remote_prefill:
             bar = tqdm(total=0, desc="批次預翻譯", unit="str")
 
@@ -249,7 +252,7 @@ def main():
                 bar.n = done
                 bar.refresh()
 
-            prefill_translation_cache(
+            prefill_stats = prefill_translation_cache(
                 all_targets,
                 cfg.model,
                 cfg.language.system_prompt,
@@ -262,6 +265,7 @@ def main():
                 glossary=glossary,
             )
             bar.close()
+            prefill_translated = prefill_stats.translated
             _flush_cache(cache_path, cache)
 
         for target in tqdm(all_targets, desc="翻譯中", unit="file"):
@@ -293,7 +297,9 @@ def main():
         if failed_files > 0:
             print(f"⚠ {failed_files} 個模組/任務書含翻譯失敗項目，詳見 Failed Items/ 資料夾。")
 
-        print(f"\n完成 — 已翻譯={total_translated:,}  快取={total_cached:,}  回退={total_fallback:,}")
+        print("\n" + "\n".join(build_summary_lines(
+            False, prefill_translated, total_translated, total_cached, total_fallback,
+        )))
     finally:
         translator.close()
 

@@ -59,3 +59,34 @@ def build_stats_text(
         eta_str = _format_hms(int(remaining / speed))
 
     return f"速度：{speed_part}  |  已用時間：{elapsed_str}  |  預計剩餘：{eta_str}"
+
+
+def build_summary_lines(
+    cancelled: bool,
+    prefill_translated: int,
+    translated: int,
+    cached: int,
+    fallback: int,
+) -> list[str]:
+    """組出翻譯結尾摘要（GUI 與 CLI 共用）。
+
+    批次預翻譯的成功字串在逐檔階段以快取命中計數，若不併入顯示，
+    「已翻譯」會嚴重低估真實 API 消耗（取消於預翻譯階段時甚至全為 0）。
+    故「本輪 API 翻譯」= 批次預翻譯成功數 + 逐檔階段實翻數。
+    """
+    lines = ["翻譯已中止" if cancelled else "翻譯完成"]
+    if prefill_translated > 0:
+        api_total = prefill_translated + translated
+        lines.append(
+            f"  本輪 API 翻譯：{api_total:,} 條"
+            f"（批次預翻譯 {prefill_translated:,} + 逐檔 {translated:,}）"
+        )
+        cache_note = "（含本輪批次預翻譯寫入的字串）" if cached > 0 else ""
+        lines.append(f"  快取命中：{cached:,} 組{cache_note}")
+    else:
+        lines.append(f"  已翻譯：{translated:,} 組")
+        lines.append(f"  快取命中：{cached:,} 組")
+    lines.append(f"  回退（使用原文）：{fallback:,} 組")
+    if cancelled and prefill_translated + translated > 0:
+        lines.append("  已完成的字串皆已寫入快取，繼續翻譯不會重翻。")
+    return lines
