@@ -6,6 +6,7 @@ import json
 from modpack_translator.pipeline.glossary import (
     load_custom_terms,
     load_merged_glossary,
+    modnames_glossary_path,
     save_custom_terms,
 )
 
@@ -60,3 +61,13 @@ def test_custom_override_is_case_insensitive_keeps_canonical_key(tmp_path):
 def test_load_custom_terms_non_dict_returns_empty(tmp_path):
     (tmp_path / "arr.json").write_text("[1, 2]", encoding="utf-8")
     assert load_custom_terms(tmp_path / "arr.json") == {}
+
+
+def test_prebuilt_modnames_asset_loads():
+    p = modnames_glossary_path("zh_tw")
+    assert p.exists()
+    g = load_merged_glossary(None, p, None)
+    assert g is not None
+    assert g.terms["Twilight Forest"] == "暮光森林"
+    assert g.terms["Create"] == "機械動力"
+    assert len(g.terms) >= 40
