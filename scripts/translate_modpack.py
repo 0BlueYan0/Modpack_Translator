@@ -22,6 +22,7 @@ from modpack_translator.pipeline.patcher import (
     backup_quest_configs,
     patch_modonomicon_unicode_fonts,
 )
+from modpack_translator.pipeline.pack_context import load_pack_context
 from modpack_translator.pipeline.preprocessor import diff_keys
 from modpack_translator.pipeline.runner import (
     _write_failed_items,
@@ -236,12 +237,21 @@ def main():
         backed_up = backup_quest_configs(game_root)
         print(f"已備份 {backed_up} 個任務/設定資料夾至 quests_bak/")
 
+    # 每包語境：extra_prompt 併入 system prompt 靜態段（[Glossary] 動態區塊恆在其後）
+    pack_context = load_pack_context(game_root)
+    system_prompt = cfg.language.system_prompt
+    if pack_context.extra_prompt.strip():
+        system_prompt = system_prompt + "\n\n[Pack context]\n" + pack_context.extra_prompt.strip()
+        print("已載入此包的翻譯語境提示詞。")
+    if pack_context.learned_count():
+        print(f"已載入此包 {pack_context.learned_count()} 條學習譯法。")
+
     if cfg.model.backend_mode == "remote":
         print("\n正在連線遠端 API…")
     else:
         print("\n正在連線或啟動本機模型服務…")
     try:
-        translator = build_translator(cfg.model, cfg.language.system_prompt, glossary)
+        translator = build_translator(cfg.model, system_prompt, glossary, pack_context)
     except TranslatorFatalError as exc:
         print(f"模型服務啟動失敗：{exc}")
         raise SystemExit(1)
@@ -270,7 +280,7 @@ def main():
             prefill_stats = prefill_translation_cache(
                 all_targets,
                 cfg.model,
-                cfg.language.system_prompt,
+                system_prompt,
                 cfg.language.code,
                 cache,
                 retry_count=args.retry,
@@ -278,6 +288,7 @@ def main():
                 on_log=tqdm.write,
                 flush_cache=lambda: _flush_cache(cache_path, cache),
                 glossary=glossary,
+                pack_context=pack_context,
             )
             bar.close()
             prefill_translated = prefill_stats.translated
@@ -316,6 +327,10 @@ def main():
             False, prefill_translated, total_translated, total_cached, total_fallback,
         )))
     finally:
+        try:
+            pack_context.save()
+        except OSError as exc:
+            print(f"[警告] 包語境存檔失敗：{exc}")
         translator.close()
 
 

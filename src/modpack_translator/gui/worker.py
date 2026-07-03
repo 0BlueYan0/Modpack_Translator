@@ -16,6 +16,7 @@ from modpack_translator.pipeline.patcher import (
     backup_quest_configs,
     patch_modonomicon_unicode_fonts,
 )
+from modpack_translator.pipeline.pack_context import load_pack_context
 from modpack_translator.pipeline.preprocessor import diff_keys
 from modpack_translator.pipeline.runner import (
     _write_failed_items,
@@ -177,6 +178,18 @@ class TranslateWorker(QThread):
                 backed_up = backup_quest_configs(game_root)
                 self.log.emit(f"已備份 {backed_up} 個任務/設定資料夾至 quests_bak/")
 
+            # 每包語境：extra_prompt 併入 system prompt 靜態段（cache 友善：
+            # [Glossary] 動態區塊永遠在其後），learned_terms 供動態注入
+            pack_context = load_pack_context(game_root)
+            system_prompt = self._cfg.language.system_prompt
+            if pack_context.extra_prompt.strip():
+                system_prompt = (
+                    system_prompt + "\n\n[Pack context]\n" + pack_context.extra_prompt.strip()
+                )
+                self.log.emit("已載入此包的翻譯語境提示詞。")
+            if pack_context.learned_count():
+                self.log.emit(f"已載入此包 {pack_context.learned_count()} 條學習譯法。")
+
             # 用語庫：官方＋模組名＋自訂三層合併；載入與 regex 編譯皆在
             # worker 執行緒內，建構後不可變、跨執行緒安全
             glossary = None
@@ -203,7 +216,7 @@ class TranslateWorker(QThread):
             translator = None
             try:
                 translator = build_translator(
-                    self._cfg.model, self._cfg.language.system_prompt, glossary
+                    self._cfg.model, system_prompt, glossary, pack_context
                 )
                 self._translator = translator
             except Exception as exc:
@@ -220,7 +233,7 @@ class TranslateWorker(QThread):
                     prefill_stats = prefill_translation_cache(
                         self._targets,
                         self._cfg.model,
-                        self._cfg.language.system_prompt,
+                        system_prompt,
                         self._cfg.language.code,
                         cache,
                         retry_count=self._retry_count,
@@ -229,6 +242,7 @@ class TranslateWorker(QThread):
                         on_log=self.log.emit,
                         flush_cache=lambda: _flush_cache(cache_path, cache),
                         glossary=glossary,
+                        pack_context=pack_context,
                     )
                     prefill_translated = prefill_stats.translated
                     _flush_cache(cache_path, cache)
@@ -293,6 +307,15 @@ class TranslateWorker(QThread):
                     failed_files_written, prefill_translated,
                 )
             finally:
+                try:
+                    pack_context.save()
+                    if pack_context.learned_count():
+                        self.log.emit(
+                            f"本包已累積 {pack_context.learned_count()} 條學習譯法"
+                            "（存於包內 .modpack_translator/context.json）。"
+                        )
+                except OSError as exc:
+                    self.log.emit(f"[警告] 包語境存檔失敗：{exc}")
                 translator.close()
                 self._translator = None
 
