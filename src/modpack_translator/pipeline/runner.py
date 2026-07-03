@@ -282,6 +282,24 @@ def translate_dict(
     failed: dict[str, str] = {}
     n_translated = n_cached = n_fallback = 0
 
+    # 既有譯文遷移：與快取值一致代表是本工具翻的（非人工修改），
+    # 套 enforce 修復句中殘留的英文詞彙並寫回；不一致者一律不動。
+    # 不計入統計——是零成本的順帶修復，非本輪翻譯量。
+    if glossary is not None:
+        for key, existing_value in zh_existing.items():
+            if key in to_translate:
+                continue
+            src = en_dict.get(key)
+            if src is None:
+                continue
+            ck = cache_key(src)
+            if cache.get(ck) != existing_value:
+                continue
+            enforced = _enforce_glossary(glossary, src, existing_value)
+            if enforced != existing_value:
+                result[key] = enforced
+                cache[ck] = enforced
+
     for key in to_translate:
         if cancel_check is not None and cancel_check():
             break
@@ -433,6 +451,7 @@ def _process_patchouli(
     if not target.path_in_jar:
         raise ValueError(f"Missing Patchouli source path for {target.source_file}")
 
+    glossary = getattr(translator, "glossary", None)
     source_page = read_patchouli_page(target.source_file, target.path_in_jar)
     target_path = target.target_path_in_jar or target.path_in_jar
     if not target_path:
@@ -443,8 +462,17 @@ def _process_patchouli(
     existing_strings = read_patchouli_text(existing_page) if existing_page else {}
     for path_key, existing_value in existing_strings.items():
         source_value = source_strings.get(path_key)
-        if source_value is not None and is_usable_translation(source_value, existing_value):
-            write_patchouli_text(page, path_key, existing_value)
+        if source_value is None:
+            continue
+        if not is_usable_translation(source_value, existing_value, glossary=glossary):
+            continue
+        ck = cache_key(source_value)
+        if cache.get(ck) == existing_value:
+            enforced = _enforce_glossary(glossary, source_value, existing_value)
+            if enforced != existing_value:
+                cache[ck] = enforced
+                existing_value = enforced
+        write_patchouli_text(page, path_key, existing_value)
 
     existing_strings = read_patchouli_text(page)
     to_translate = diff_keys(source_strings, existing_strings)
@@ -459,9 +487,12 @@ def _process_patchouli(
         src = source_strings[path_key]
         ck = cache_key(src)
         if ck in cache and is_usable_translation(
-            src, cache[ck], accept_identical_proper_noun=True
+            src, cache[ck], accept_identical_proper_noun=True, glossary=glossary
         ):
-            write_patchouli_text(page, path_key, cache[ck])
+            value = _enforce_glossary(glossary, src, cache[ck])
+            if value != cache[ck]:
+                cache[ck] = value
+            write_patchouli_text(page, path_key, value)
             changed = True
             n_cached += 1
             if on_pair_done is not None:

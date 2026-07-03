@@ -103,3 +103,27 @@ def test_enforce_glossary_applies_and_preserves_tokens():
     ) == "前方暮光森林 %s"
     # glossary=None 直接原樣返回
     assert _enforce_glossary(None, "x", "y") == "y"
+
+
+def test_existing_tool_translation_enforced():
+    g = Glossary({"Twilight Forest": "暮光森林"})
+    tr = RecordingTranslator(g)
+    src = "Welcome to the Twilight Forest!"
+    old = "歡迎來到 Twilight Forest！"
+    cache = {cache_key(src): old}
+    # 既有譯文與快取一致 → 工具產物 → enforce 修復並寫回 result 與 cache
+    result, *_ = translate_dict({"k": src}, {"k": old}, tr, cache)
+    assert result["k"] == "歡迎來到暮光森林！"
+    assert cache[cache_key(src)] == "歡迎來到暮光森林！"
+    assert tr.calls == []
+
+
+def test_existing_human_translation_untouched():
+    g = Glossary({"Twilight Forest": "暮光森林"})
+    tr = RecordingTranslator(g)
+    src = "Welcome to the Twilight Forest!"
+    human = "歡迎來到 Twilight Forest！"
+    # 快取中沒有對應值（或值不同）→ 視為人工翻譯 → 不動
+    result, *_ = translate_dict({"k": src}, {"k": human}, tr, {})
+    assert "k" not in result
+    assert tr.calls == []
