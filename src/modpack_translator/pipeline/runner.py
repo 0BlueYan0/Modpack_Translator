@@ -135,10 +135,8 @@ def _translate_validated(
         source, final, accept_identical_proper_noun=True, glossary=glossary
     ):
         return _enforce_glossary(glossary, source, final), True
-    if glossary is not None:
-        official = glossary.exact_match(source)
-        if official is not None and is_usable_translation(source, official):
-            return official, True
+    # 整串命中用語庫者已在呼叫模型前由上方 exact_match 短路，不會走到這裡；
+    # 故無需在模型輸出後重複 exact_match 回退。
     return source, False
 
 

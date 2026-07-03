@@ -686,12 +686,13 @@ def _translate_validated(
         source, final, accept_identical_proper_noun=True, glossary=glossary
     ):
         return _enforce_glossary(glossary, source, final), True
-    if glossary is not None:
-        official = glossary.exact_match(source)
-        if official is not None and is_usable_translation(source, official):
-            return official, True
+    # 整串命中用語庫者已在呼叫模型前由上方 exact_match 短路，不會走到這裡；
+    # 故無需在模型輸出後重複 exact_match 回退。
     return source, False
 ```
+
+> 註（執行時修正）：早期草稿在模型輸出後有第二段 exact_match 回退區塊，經驗證與呼叫模型前的
+> 短路為同一決定性條件、永不可達（dead code），已移除以保持關卡函式清晰。
 
 `translate_dict` 的快取分支改為（函式開頭先取 `glossary = getattr(translator, "glossary", None)`，`to_translate` 一行改傳 `glossary`）：
 
