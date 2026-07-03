@@ -48,3 +48,15 @@ def test_custom_terms_roundtrip(tmp_path):
     assert load_custom_terms(tmp_path / "missing.json") == {}
     (tmp_path / "bad.json").write_text("not json", encoding="utf-8")
     assert load_custom_terms(tmp_path / "bad.json") == {}
+
+
+def test_custom_override_is_case_insensitive_keeps_canonical_key(tmp_path):
+    modnames = _write(tmp_path, "modnames.json", {"Twilight Forest": "暮色森林"})
+    custom = _write(tmp_path, "custom.json", {"twilight forest": "暮光森林"})
+    g = load_merged_glossary(None, modnames, custom)
+    assert g.terms == {"Twilight Forest": "暮光森林"}  # 單一鍵、保留正式大小寫、採自訂譯名
+
+
+def test_load_custom_terms_non_dict_returns_empty(tmp_path):
+    (tmp_path / "arr.json").write_text("[1, 2]", encoding="utf-8")
+    assert load_custom_terms(tmp_path / "arr.json") == {}

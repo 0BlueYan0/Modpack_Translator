@@ -230,17 +230,25 @@ def load_merged_glossary(
     custom_path: str | Path | None,
 ) -> Glossary | None:
     """三層合併：官方 → 模組名 → 自訂，後者覆蓋前者；自訂空譯名刪除詞條
-    （大小寫不敏感比對既有鍵）。全空時回 None。"""
+    （大小寫不敏感比對既有鍵）。全空時回 None。
+
+    自訂覆蓋既有詞時保留既有鍵的原始大小寫（enforce 為大小寫敏感），只更新
+    譯名；既有無此詞才以自訂鍵新增。"""
     terms: dict[str, str] = {}
     for p in (official_path, modnames_path):
         layer = load_glossary(p)
         if layer is not None:
             terms.update(layer.terms)
     for en, zh in load_custom_terms(custom_path).items():
+        existing = [k for k in terms if k.lower() == en.lower()]
         if zh:
-            terms[en] = zh
+            if existing:
+                for k in existing:
+                    terms[k] = zh
+            else:
+                terms[en] = zh
         else:
-            for k in [k for k in terms if k.lower() == en.lower()]:
+            for k in existing:
                 del terms[k]
     return Glossary(terms) if terms else None
 
