@@ -47,23 +47,30 @@ def resolve_game_root(path: Path) -> Path:
 
 
 class ModpackScanner:
-    def scan(self, modpack_path: Path, lang_code: str = "zh_tw", glossary=None) -> list[TranslationTarget]:
+    def scan(self, modpack_path: Path, lang_code: str = "zh_tw", glossary=None,
+             include_translated: bool = False) -> list[TranslationTarget]:
+        """掃描待翻譯目標。include_translated=True 時停用「已翻譯就跳過」的過濾，
+        回傳所有含來源字串的目標（供建立 hash→英文 sidecar 用，不用於翻譯流程）。"""
         root = self._resolve_game_root(modpack_path)
         print(f"Detected game root: {root}")
 
-        targets: list[TranslationTarget] = []
+        self._include_translated = include_translated
+        try:
+            targets: list[TranslationTarget] = []
 
-        mods_dir = root / "mods"
-        if mods_dir.is_dir():
-            for jar in sorted(mods_dir.glob("*.jar")):
-                targets.extend(self._scan_jar(jar, lang_code, glossary))
+            mods_dir = root / "mods"
+            if mods_dir.is_dir():
+                for jar in sorted(mods_dir.glob("*.jar")):
+                    targets.extend(self._scan_jar(jar, lang_code, glossary))
 
-        targets.extend(self._scan_ftbquests(root, lang_code, glossary))
-        targets.extend(self._scan_heracles(root, lang_code, glossary))
-        targets.extend(self._scan_betterquesting(root, lang_code, glossary))
-        targets.extend(self._scan_kubejs(root, lang_code, glossary))
+            targets.extend(self._scan_ftbquests(root, lang_code, glossary))
+            targets.extend(self._scan_heracles(root, lang_code, glossary))
+            targets.extend(self._scan_betterquesting(root, lang_code, glossary))
+            targets.extend(self._scan_kubejs(root, lang_code, glossary))
 
-        return targets
+            return targets
+        finally:
+            self._include_translated = False
 
     def _resolve_game_root(self, path: Path) -> Path:
         return resolve_game_root(path)
@@ -155,6 +162,8 @@ class ModpackScanner:
         lang_ext: str,
         glossary=None,
     ) -> bool:
+        if getattr(self, "_include_translated", False):
+            return True
         try:
             source_raw = zf.read(source_path).decode("utf-8-sig")
             source = parse_json_lang(source_raw) if lang_ext == "json" else parse_legacy_lang(source_raw)
@@ -197,6 +206,8 @@ class ModpackScanner:
         return "/".join(target_parts)
 
     def _patchouli_needs_translation(self, zf: zipfile.ZipFile, source_path: str, target_path: str, glossary=None) -> bool:
+        if getattr(self, "_include_translated", False):
+            return True
         try:
             source_page = json.loads(zf.read(source_path).decode("utf-8-sig"))
         except (json.JSONDecodeError, KeyError, UnicodeDecodeError):
@@ -252,6 +263,8 @@ class ModpackScanner:
         return englishish >= max(1, len(sample) // 3) and cjk <= max(1, len(sample) // 4)
 
     def _scan_file_has_pending_text(self, source_file: Path, target_file: Path, parser, glossary=None) -> bool:
+        if getattr(self, "_include_translated", False):
+            return True
         try:
             source = parser(source_file.read_text(encoding="utf-8"))
             existing = parser(target_file.read_text(encoding="utf-8")) if target_file.exists() else {}

@@ -21,10 +21,13 @@ from modpack_translator.pipeline.preprocessor import diff_keys
 from modpack_translator.pipeline.runner import (
     _write_failed_items,
     failed_target_name,
+    iter_all_source_strings,
     normalize_cache_with_glossary,
     process_target,
     read_existing_target,
     read_target_strings,
+    source_sidecar_path,
+    sync_source_sidecar,
 )
 from modpack_translator.pipeline.scanner import ModpackScanner, TranslationTarget, resolve_game_root
 from modpack_translator.pipeline._chat import TranslatorFatalError
@@ -292,6 +295,19 @@ class TranslateWorker(QThread):
                         self.log.emit(f"進度已儲存（{i + 1}/{total} 個檔案）…")
 
                 _flush_cache(cache_path, cache)
+
+                # 建立/更新 hash→英文 對照表（translation_sources.json，與快取同 key）
+                try:
+                    resolved = sync_source_sidecar(
+                        cache,
+                        iter_all_source_strings(self._modpack_path, self._cfg.language.code),
+                        source_sidecar_path(cache_path),
+                    )
+                    self.log.emit(
+                        f"已更新來源對照表 translation_sources.json（可反查 {resolved:,}/{len(cache):,}）。"
+                    )
+                except Exception as exc:  # noqa: BLE001 — 對照表失敗不可影響翻譯結果
+                    self.log.emit(f"[警告] 來源對照表更新失敗（不影響翻譯）：{exc}")
 
                 # 寫出失敗項目
                 failed_dir = _PROJECT_ROOT / "Failed Items"
