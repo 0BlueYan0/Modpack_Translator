@@ -531,6 +531,8 @@ def _settle(ctx: _RunContext, item: PrefillItem, final: str | None) -> None:
         ctx.cache[item.ck] = final
         ctx.stats.translated += 1
         ctx.since_flush += 1
+        if ctx.pack_context is not None:
+            ctx.pack_context.maybe_record(item.source, final, ctx.glossary)
     else:
         ctx.stats.failed += 1
     if ctx.flush_cache is not None and ctx.since_flush >= _FLUSH_EVERY:

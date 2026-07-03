@@ -293,6 +293,7 @@ def translate_dict(
 ) -> tuple[dict[str, str], int, int, int, dict[str, str]]:
     """翻譯缺少/未翻譯的鍵值。回傳 (result, translated, cached, fallback, failed)。"""
     glossary = getattr(translator, "glossary", None)
+    pack_context = getattr(translator, "pack_context", None)
     to_translate = diff_keys(en_dict, zh_existing, glossary=glossary)
     result: dict[str, str] = {}
     failed: dict[str, str] = {}
@@ -343,6 +344,8 @@ def translate_dict(
             result[key] = final
             cache[ck] = final
             n_translated += 1
+            if pack_context is not None:
+                pack_context.maybe_record(src, final, glossary)
         else:
             result[key] = src
             failed[key] = src
@@ -468,6 +471,7 @@ def _process_patchouli(
         raise ValueError(f"Missing Patchouli source path for {target.source_file}")
 
     glossary = getattr(translator, "glossary", None)
+    pack_context = getattr(translator, "pack_context", None)
     source_page = read_patchouli_page(target.source_file, target.path_in_jar)
     target_path = target.target_path_in_jar or target.path_in_jar
     if not target_path:
@@ -521,6 +525,8 @@ def _process_patchouli(
             cache[ck] = final
             changed = True
             n_translated += 1
+            if pack_context is not None:
+                pack_context.maybe_record(src, final, glossary)
         else:
             failed[path_key] = src
             n_fallback += 1
