@@ -47,7 +47,7 @@ def resolve_game_root(path: Path) -> Path:
 
 
 class ModpackScanner:
-    def scan(self, modpack_path: Path, lang_code: str = "zh_tw") -> list[TranslationTarget]:
+    def scan(self, modpack_path: Path, lang_code: str = "zh_tw", glossary=None) -> list[TranslationTarget]:
         root = self._resolve_game_root(modpack_path)
         print(f"Detected game root: {root}")
 
@@ -56,12 +56,12 @@ class ModpackScanner:
         mods_dir = root / "mods"
         if mods_dir.is_dir():
             for jar in sorted(mods_dir.glob("*.jar")):
-                targets.extend(self._scan_jar(jar, lang_code))
+                targets.extend(self._scan_jar(jar, lang_code, glossary))
 
-        targets.extend(self._scan_ftbquests(root, lang_code))
-        targets.extend(self._scan_heracles(root, lang_code))
-        targets.extend(self._scan_betterquesting(root, lang_code))
-        targets.extend(self._scan_kubejs(root, lang_code))
+        targets.extend(self._scan_ftbquests(root, lang_code, glossary))
+        targets.extend(self._scan_heracles(root, lang_code, glossary))
+        targets.extend(self._scan_betterquesting(root, lang_code, glossary))
+        targets.extend(self._scan_kubejs(root, lang_code, glossary))
 
         return targets
 
@@ -70,7 +70,7 @@ class ModpackScanner:
 
     # ------------------------------------------------------------------ jars
 
-    def _scan_jar(self, jar_path: Path, lang_code: str) -> list[TranslationTarget]:
+    def _scan_jar(self, jar_path: Path, lang_code: str, glossary=None) -> list[TranslationTarget]:
         targets: list[TranslationTarget] = []
         try:
             with zipfile.ZipFile(jar_path) as zf:
@@ -82,7 +82,7 @@ class ModpackScanner:
                     if lang_ext:
                         mod_id = parts[1]
                         target_path = self._target_lang_path(name, lang_code, name_set)
-                        if self._jar_lang_needs_translation(zf, name, target_path, lang_ext):
+                        if self._jar_lang_needs_translation(zf, name, target_path, lang_ext, glossary):
                             targets.append(TranslationTarget(
                                 source_file=jar_path,
                                 path_in_jar=name,
@@ -104,7 +104,7 @@ class ModpackScanner:
                         if not target_path:
                             continue
                         mod_id = parts[1]
-                        if self._patchouli_needs_translation(zf, name, target_path):
+                        if self._patchouli_needs_translation(zf, name, target_path, glossary):
                             targets.append(TranslationTarget(
                                 source_file=jar_path,
                                 path_in_jar=name,
@@ -153,6 +153,7 @@ class ModpackScanner:
         source_path: str,
         target_path: str,
         lang_ext: str,
+        glossary=None,
     ) -> bool:
         try:
             source_raw = zf.read(source_path).decode("utf-8-sig")
@@ -169,7 +170,7 @@ class ModpackScanner:
                 existing = parse_json_lang(target_raw) if lang_ext == "json" else parse_legacy_lang(target_raw)
             except (KeyError, UnicodeDecodeError, json.JSONDecodeError):
                 existing = {}
-        return bool(diff_keys(source, existing))
+        return bool(diff_keys(source, existing, glossary=glossary))
 
     def _target_patchouli_path(self, parts: list[str], lang_code: str, names: set[str]) -> str | None:
         source_locale_idx = next(
@@ -195,7 +196,7 @@ class ModpackScanner:
         target_parts[source_locale_idx] = lang_code.lower()
         return "/".join(target_parts)
 
-    def _patchouli_needs_translation(self, zf: zipfile.ZipFile, source_path: str, target_path: str) -> bool:
+    def _patchouli_needs_translation(self, zf: zipfile.ZipFile, source_path: str, target_path: str, glossary=None) -> bool:
         try:
             source_page = json.loads(zf.read(source_path).decode("utf-8-sig"))
         except (json.JSONDecodeError, KeyError, UnicodeDecodeError):
@@ -212,7 +213,7 @@ class ModpackScanner:
             except (json.JSONDecodeError, UnicodeDecodeError):
                 target_page = {}
             existing = read_patchouli_text(target_page)
-        return bool(diff_keys(source, existing))
+        return bool(diff_keys(source, existing, glossary=glossary))
 
     # ---------------------------------------------------------- local lang files
 
@@ -250,13 +251,13 @@ class ModpackScanner:
         cjk = sum(1 for value in sample if re.search(r"[\u3400-\u9fff]", value))
         return englishish >= max(1, len(sample) // 3) and cjk <= max(1, len(sample) // 4)
 
-    def _scan_file_has_pending_text(self, source_file: Path, target_file: Path, parser) -> bool:
+    def _scan_file_has_pending_text(self, source_file: Path, target_file: Path, parser, glossary=None) -> bool:
         try:
             source = parser(source_file.read_text(encoding="utf-8"))
             existing = parser(target_file.read_text(encoding="utf-8")) if target_file.exists() else {}
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return False
-        return bool(diff_keys(source, existing))
+        return bool(diff_keys(source, existing, glossary=glossary))
 
     def _target_flat_locale_file(self, source_file: Path, lang_code: str) -> Path:
         for locale in self._locale_candidates(lang_code):
@@ -285,7 +286,7 @@ class ModpackScanner:
                 return locale
         return lang_code.lower()
 
-    def _scan_snbt_lang_tree(self, lang_root: Path, mod_id: str, fmt: str, lang_code: str) -> list[TranslationTarget]:
+    def _scan_snbt_lang_tree(self, lang_root: Path, mod_id: str, fmt: str, lang_code: str, glossary=None) -> list[TranslationTarget]:
         if not lang_root.is_dir():
             return []
 
@@ -307,7 +308,7 @@ class ModpackScanner:
                 if self._is_locale_like_name(locale_name) or not self._looks_english_like_file(lang_file, parse_snbt_lang):
                     continue
 
-            if not self._scan_file_has_pending_text(lang_file, target_file, parse_snbt_lang):
+            if not self._scan_file_has_pending_text(lang_file, target_file, parse_snbt_lang, glossary):
                 continue
 
             targets.append(TranslationTarget(
@@ -321,7 +322,7 @@ class ModpackScanner:
             ))
         return targets
 
-    def _scan_lang_files(self, root: Path, mod_id: str, fmt: str, suffix: str, parser, lang_code: str) -> list[TranslationTarget]:
+    def _scan_lang_files(self, root: Path, mod_id: str, fmt: str, suffix: str, parser, lang_code: str, glossary=None) -> list[TranslationTarget]:
         if not root.is_dir():
             return []
 
@@ -335,7 +336,7 @@ class ModpackScanner:
                     continue
 
             target_file = self._target_flat_locale_file(lang_file, lang_code)
-            if not self._scan_file_has_pending_text(lang_file, target_file, parser):
+            if not self._scan_file_has_pending_text(lang_file, target_file, parser, glossary):
                 continue
             targets.append(TranslationTarget(
                 source_file=lang_file,
@@ -395,35 +396,35 @@ class ModpackScanner:
 
     # --------------------------------------------------------------- FTB Quests
 
-    def _scan_ftbquests(self, modpack_path: Path, lang_code: str) -> list[TranslationTarget]:
+    def _scan_ftbquests(self, modpack_path: Path, lang_code: str, glossary=None) -> list[TranslationTarget]:
         config_dir = modpack_path / "config" / "ftbquests"
         if not config_dir.is_dir():
             return []
         quests_dir = config_dir / "quests"
-        targets = self._scan_snbt_lang_tree(quests_dir / "lang", "ftbquests", "ftbq_snbt", lang_code)
+        targets = self._scan_snbt_lang_tree(quests_dir / "lang", "ftbquests", "ftbq_snbt", lang_code, glossary)
         targets.extend(self._scan_inline_snbt_files(quests_dir, "ftbquests", "ftbq_inline_snbt"))
         return targets
 
     # --------------------------------------------------------------- Heracles (Odyssey Quests)
 
-    def _scan_heracles(self, modpack_path: Path, lang_code: str) -> list[TranslationTarget]:
+    def _scan_heracles(self, modpack_path: Path, lang_code: str, glossary=None) -> list[TranslationTarget]:
         config_dir = modpack_path / "config" / "heracles"
         if not config_dir.is_dir():
             return []
         quests_dir = config_dir / "quests"
-        targets = self._scan_snbt_lang_tree(quests_dir / "lang", "heracles", "heracles_snbt", lang_code)
+        targets = self._scan_snbt_lang_tree(quests_dir / "lang", "heracles", "heracles_snbt", lang_code, glossary)
         targets.extend(self._scan_inline_snbt_files(quests_dir, "heracles", "heracles_inline_snbt"))
         return targets
 
     # --------------------------------------------------------------- Better Questing (1.12.x)
 
-    def _scan_betterquesting(self, modpack_path: Path, lang_code: str) -> list[TranslationTarget]:
+    def _scan_betterquesting(self, modpack_path: Path, lang_code: str, glossary=None) -> list[TranslationTarget]:
         config_dir = modpack_path / "config" / "betterquesting"
-        return self._scan_lang_files(config_dir, "betterquesting", "bq_lang", ".lang", parse_legacy_lang, lang_code)
+        return self._scan_lang_files(config_dir, "betterquesting", "bq_lang", ".lang", parse_legacy_lang, lang_code, glossary)
 
     # --------------------------------------------------------------- KubeJS lang
 
-    def _scan_kubejs(self, modpack_path: Path, lang_code: str) -> list[TranslationTarget]:
+    def _scan_kubejs(self, modpack_path: Path, lang_code: str, glossary=None) -> list[TranslationTarget]:
         assets_dir = modpack_path / "kubejs" / "assets"
         if not assets_dir.is_dir():
             return []
@@ -431,5 +432,5 @@ class ModpackScanner:
         for lang_dir in sorted(assets_dir.glob("*/lang")):
             if lang_dir.is_dir():
                 namespace = lang_dir.parent.name
-                targets.extend(self._scan_lang_files(lang_dir, namespace, "kubejs_json", ".json", parse_json_lang, lang_code))
+                targets.extend(self._scan_lang_files(lang_dir, namespace, "kubejs_json", ".json", parse_json_lang, lang_code, glossary))
         return targets

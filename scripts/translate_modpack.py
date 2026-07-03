@@ -199,7 +199,7 @@ def main():
 
     print(f"掃描模組包：{modpack_path}")
     scanner = ModpackScanner()
-    all_targets = scanner.scan(modpack_path, cfg.language.code)
+    all_targets = scanner.scan(modpack_path, cfg.language.code, glossary)
     all_targets = _filter_pending_targets(all_targets, cfg.language.code, glossary)
 
     if args.skip_mods:

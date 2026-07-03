@@ -83,7 +83,8 @@ class ScanWorker(QThread):
             self.log.emit(f"偵測到遊戲根目錄：{root}")
 
             targets = _filter_pending_targets(
-                scanner.scan(self._modpack_path, self._lang_code), self._lang_code, self._glossary
+                scanner.scan(self._modpack_path, self._lang_code, self._glossary),
+                self._lang_code, self._glossary,
             )
 
             if self._skip_mods:
