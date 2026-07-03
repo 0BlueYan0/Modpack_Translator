@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Sequence
 
 # src/modpack_translator/pipeline/ → 上 4 層到專案根目錄
 _PROJECT_ROOT = Path(__file__).parents[3]
@@ -146,19 +146,44 @@ class Glossary:
 
     def format_block(self, pairs: list[tuple[str, str]], cap: int = _SINGLE_TERM_CAP) -> str:
         """把命中的詞彙渲染成附加在 system prompt 尾端的 [Glossary] 區塊。"""
-        if not pairs:
-            return ""
-        lines: list[str] = []
-        size = len(_BLOCK_HEADER)
-        for en, zh in pairs[:cap]:
-            line = f"{en} = {zh}"
-            if size + len(line) + 1 > _BLOCK_CHAR_BUDGET:
-                break
-            lines.append(line)
-            size += len(line) + 1
-        if not lines:
-            return ""
-        return _BLOCK_HEADER + "\n".join(lines)
+        return format_block(pairs, cap=cap)
+
+
+def format_block(pairs: list[tuple[str, str]], cap: int = _SINGLE_TERM_CAP) -> str:
+    """把命中的詞彙渲染成附加在 system prompt 尾端的 [Glossary] 區塊。"""
+    if not pairs:
+        return ""
+    lines: list[str] = []
+    size = len(_BLOCK_HEADER)
+    for en, zh in pairs[:cap]:
+        line = f"{en} = {zh}"
+        if size + len(line) + 1 > _BLOCK_CHAR_BUDGET:
+            break
+        lines.append(line)
+        size += len(line) + 1
+    if not lines:
+        return ""
+    return _BLOCK_HEADER + "\n".join(lines)
+
+
+def merged_match_pairs(
+    glossaries: "Sequence[Glossary | None]",
+    texts: Iterable[str],
+) -> list[tuple[str, str]]:
+    """依序合併多個用語庫的命中結果：先者優先（主用語庫先佔詞數上限、
+    衝突時先者勝），大小寫不敏感去重。texts 會被重複掃描，先物化。"""
+    materialized = list(texts)
+    seen: set[str] = set()
+    pairs: list[tuple[str, str]] = []
+    for g in glossaries:
+        if g is None:
+            continue
+        for en, zh in g.match_terms(materialized):
+            if en.lower() in seen:
+                continue
+            seen.add(en.lower())
+            pairs.append((en, zh))
+    return pairs
 
 
 def augment_prompt(
@@ -166,11 +191,14 @@ def augment_prompt(
     glossary: Glossary | None,
     texts: Iterable[str],
     cap: int = _SINGLE_TERM_CAP,
+    context_glossary: Glossary | None = None,
 ) -> str:
-    """glossary 為 None 或無命中時原樣回傳 system_prompt，否則附加 [Glossary] 區塊。"""
-    if glossary is None:
+    """無用語庫或無命中時原樣回傳 system_prompt，否則附加 [Glossary] 區塊。
+    context_glossary（動態層）墊底：主用語庫命中先佔詞數上限。"""
+    if glossary is None and context_glossary is None:
         return system_prompt
-    block = glossary.format_block(glossary.match_terms(texts), cap=cap)
+    pairs = merged_match_pairs((glossary, context_glossary), texts)
+    block = format_block(pairs, cap=cap)
     return system_prompt + block
 
 
