@@ -4,7 +4,10 @@ import json
 import re
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from modpack_translator.pipeline.glossary import Glossary
 
 
 # Single-pass regex: matches structural tokens that must be preserved via {N} encoding.
@@ -112,6 +115,7 @@ def is_usable_translation(
     key: str | None = None,
     *,
     accept_identical_proper_noun: bool = False,
+    glossary: "Glossary | None" = None,
 ) -> bool:
     if not _has_translatable_text(source):
         return True
@@ -124,6 +128,11 @@ def is_usable_translation(
     if dst == src:
         if not needs_visible_translation:
             return True
+        # 用語庫守門：整串命中用語庫的原樣返回一律不放行——凌駕下方的
+        # 專有名詞豁免與任務標題豁免。呼叫端以 exact_match 譯名取代
+        # （runner._translate_validated），或讓該鍵進 diff 重翻（零 API 成本）。
+        if glossary is not None and glossary.exact_match(source) is not None:
+            return False
         # 任務標題常刻意保留英文專有名詞（模組名、玩家 ID）。既有翻譯檔中
         # 與原文完全相同的標題視為譯者的選擇，不再重複送翻。
         # accept_identical_proper_noun 供模型輸出關卡與快取讀取使用：模型對
@@ -642,7 +651,11 @@ def _english_words(value: str) -> set[str]:
     return {m.group(0).lower() for m in re.finditer(r"[A-Za-z]{2,}", value)}
 
 
-def diff_keys(en_dict: dict[str, str], zh_dict: dict[str, str]) -> set[str]:
+def diff_keys(
+    en_dict: dict[str, str],
+    zh_dict: dict[str, str],
+    glossary: "Glossary | None" = None,
+) -> set[str]:
     """Return keys that are missing from zh or still identical to en."""
     translatable_keys = {
         k for k, value in en_dict.items()
@@ -653,7 +666,7 @@ def diff_keys(en_dict: dict[str, str], zh_dict: dict[str, str]) -> set[str]:
         k
         for k in translatable_keys
         if k in zh_dict
-        and not is_usable_translation(en_dict[k], zh_dict[k], key=k)
+        and not is_usable_translation(en_dict[k], zh_dict[k], key=k, glossary=glossary)
     }
     return missing | untranslated
 
