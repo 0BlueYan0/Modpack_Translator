@@ -75,6 +75,50 @@ def normalize_cache_with_glossary(cache: dict[str, str], glossary: Any) -> int:
     return changed
 
 
+def iter_all_source_strings(modpack_path, lang_code: str = "zh_tw"):
+    """走訪模組包所有來源字串（含已翻譯檔，停用待翻過濾）。
+    供 sync_source_sidecar 反查 hash→英文;不用於翻譯流程。"""
+    from modpack_translator.pipeline.scanner import ModpackScanner
+
+    scanner = ModpackScanner()
+    for target in scanner.scan(modpack_path, lang_code, include_translated=True):
+        try:
+            strings = read_target_strings(target)
+        except Exception:
+            continue
+        yield from strings.values()
+
+
+def sync_source_sidecar(cache: dict[str, str], source_strings, sidecar_path) -> int:
+    """建立/更新與 cache 同 key 集合的 hash→英文 對照檔（sidecar）。
+
+    cache 的 key 是 sha256(原文)、不存原文;此檔把原文補回來,供人工稽核
+    「某個 hash 原本英文是什麼」。輸出的 key 集合與 cache 完全一致(無法從
+    本包來源反查者以既有 sidecar 值補、再退為空字串),故稱「與快取同步」。
+    回傳成功反查(非空)的條數。"""
+    src_by_hash: dict[str, str] = {}
+    for s in source_strings:
+        if isinstance(s, str) and s:
+            src_by_hash.setdefault(cache_key(s), s)
+    p = Path(sidecar_path)
+    prior: dict[str, str] = {}
+    if p.exists():
+        try:
+            loaded = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                prior = loaded
+        except (OSError, ValueError):
+            prior = {}
+    out = {h: (src_by_hash.get(h) or prior.get(h, "")) for h in cache}
+    p.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+    return sum(1 for v in out.values() if v)
+
+
+def source_sidecar_path(cache_path) -> Path:
+    """cache 旁的 hash→英文 sidecar 路徑(translation_sources.json)。"""
+    return Path(cache_path).with_name("translation_sources.json")
+
+
 # 用來偵測「有無可翻譯的真實字母內容」
 _HAS_LETTER_RE = re.compile(r"[A-Za-z]")
 _PATCHOULI_SEGMENT_SPLIT_RE = re.compile(r"(\$\((?:p|br2?|li\d*)\)|\\?@[A-Z][A-Z0-9_]*@)")
