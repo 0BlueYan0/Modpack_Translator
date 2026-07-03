@@ -41,6 +41,8 @@ class Glossary:
         self._zh_by_lower = {en.lower(): zh for en, zh in self.terms.items()}
         self._canon_by_lower = {en.lower(): en for en in self.terms}
         self._pattern: re.Pattern[str] | None = None
+        self._enforce_pattern: re.Pattern[str] | None = None
+        self._enforce_ready = False
 
     def _compiled(self) -> re.Pattern[str]:
         if self._pattern is None:
@@ -91,6 +93,56 @@ class Glossary:
         if zh is None:
             return None
         return f"{lead}{zh}{trail}"
+
+    def _enforce_compiled(self) -> re.Pattern[str] | None:
+        """句中替換用的 pattern：只含多字詞條目、區分大小寫。無多字詞時 None。
+
+        詞本體置於 group(1)、複數 (?:e?s)? 在群組外。詞前若為「CJK 字元＋
+        單一半形空格」，把該空格一併納入 match：中文與譯名間不留突兀空白
+        （英文語境如 "of Twilight Forest" 的空格因前字非 CJK 而保留）。
+        """
+        if not self._enforce_ready:
+            multi = sorted(
+                (t for t in self.terms if " " in t.strip()), key=len, reverse=True
+            )
+            if multi:
+                alternation = "|".join(re.escape(term) for term in multi)
+                self._enforce_pattern = re.compile(
+                    r"(?:(?<=[㐀-鿿]) )?"
+                    r"(?<![A-Za-z0-9])(" + alternation + r")(?:e?s)?(?![A-Za-z0-9])"
+                )
+            self._enforce_ready = True
+        return self._enforce_pattern
+
+    def enforce(self, text: str) -> str:
+        """把譯文中殘留的英文詞彙替換為譯名（事後保證）。
+
+        區分大小寫（避免動詞 create 誤傷）、整詞邊界、長詞優先。多字詞條目
+        句中即替換（並吃掉中文與詞之間的單一空白）；單字詞條目只在整串
+        （trim 後）完全等於該詞時替換，句中交給 prompt 注入讓模型判斷語境。
+        該詞譯名已出現在譯文中則跳過（保護「中文名(English)」夾註）。純文字
+        轉換，token 保全由呼叫端（runner._enforce_glossary）負責。
+
+        group(1) 恰為某個 alternation 詞（大小寫敏感、複數在群組外），故可用
+        self.terms.get(group(1)) 直接取譯名，不需再正規化。
+        """
+        if not self.terms:
+            return text
+        m = _EXACT_WS_RE.match(text)
+        zh_exact = self.terms.get(m.group(2))
+        if zh_exact is not None:
+            return f"{m.group(1)}{zh_exact}{m.group(3)}"
+        pattern = self._enforce_compiled()
+        if pattern is None:
+            return text
+
+        def _sub(match: re.Match[str]) -> str:
+            zh = self.terms.get(match.group(1))
+            if zh is None or zh in text:
+                return match.group(0)
+            return zh
+
+        return pattern.sub(_sub, text)
 
     def format_block(self, pairs: list[tuple[str, str]], cap: int = _SINGLE_TERM_CAP) -> str:
         """把命中的詞彙渲染成附加在 system prompt 尾端的 [Glossary] 區塊。"""
