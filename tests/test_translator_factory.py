@@ -54,7 +54,7 @@ def test_build_translator_returns_local_for_local_mode(monkeypatch):
     made = {}
 
     class DummyLocal:
-        def __init__(self, cfg, system_prompt, glossary=None):
+        def __init__(self, cfg, system_prompt, glossary=None, pack_context=None):
             made["cfg"] = cfg
 
     monkeypatch.setattr(tmod, "GGUFTranslator", DummyLocal)
@@ -101,10 +101,13 @@ def test_build_translator_forwards_glossary(monkeypatch):
     made = {}
 
     class DummyLocal:
-        def __init__(self, cfg, system_prompt, glossary=None):
+        def __init__(self, cfg, system_prompt, glossary=None, pack_context=None):
             made["glossary"] = glossary
+            made["pack_context"] = pack_context
 
     monkeypatch.setattr(tmod, "GGUFTranslator", DummyLocal)
     g = Glossary({"Nether": "地獄"})
-    tmod.build_translator(ModelConfig(backend_mode="local"), "sys", g)
+    ctx = object()
+    tmod.build_translator(ModelConfig(backend_mode="local"), "sys", g, ctx)
     assert made["glossary"] is g
+    assert made["pack_context"] is ctx

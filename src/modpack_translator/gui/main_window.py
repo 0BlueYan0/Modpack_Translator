@@ -412,9 +412,7 @@ class MainWindow(QMainWindow):
         checkbox_row.addSpacing(16)
         checkbox_row.addWidget(self.chk_quests)
         checkbox_row.addWidget(chk_quests_help)
-        checkbox_row.addStretch()
-
-        retry_row = QHBoxLayout()
+        checkbox_row.addSpacing(16)
         self.retry_spin = QSpinBox()
         self.retry_spin.setRange(0, 10)
         self.retry_spin.setValue(3)
@@ -424,10 +422,23 @@ class MainWindow(QMainWindow):
             "適用於含有 {0}、%1$s 等格式代碼的字串。\n"
             "0 = 不重試，直接以原文回退並記錄至 Failed Items/。"
         )
-        retry_row.addWidget(QLabel("重試次數："))
-        retry_row.addWidget(self.retry_spin)
-        retry_row.addWidget(retry_help)
-        retry_row.addStretch()
+        checkbox_row.addWidget(QLabel("重試次數："))
+        checkbox_row.addWidget(self.retry_spin)
+        checkbox_row.addWidget(retry_help)
+        checkbox_row.addSpacing(16)
+        self.context_btn = QPushButton("翻譯語境…")
+        # 用 minimumWidth 而非 fixedWidth：狀態會換成較長的「翻譯語境…（已設定）」，
+        # 固定 120px 會截斷末尾的「（已設定）」使狀態指示失效。
+        self.context_btn.setMinimumWidth(120)
+        self.context_btn.setEnabled(False)
+        self.context_btn.clicked.connect(self._open_context_dialog)
+        context_help = _make_help_label(
+            "描述此包的題材/語氣讓譯文更貼切；並記住此包翻譯過的譯法，\n"
+            "下次翻譯沿用（存於包內 .modpack_translator/，跟著包走）。"
+        )
+        checkbox_row.addWidget(self.context_btn)
+        checkbox_row.addWidget(context_help)
+        checkbox_row.addStretch()
 
         glossary_row = QHBoxLayout()
         self.glossary_combo = QComboBox()
@@ -442,16 +453,30 @@ class MainWindow(QMainWindow):
             "把 Minecraft 官方繁中譯名（地獄、界伏蚌、終界…）注入翻譯提示，\n"
             "讓譯文用語與官方一致；整串正好是官方詞彙時直接套用官方譯名，\n"
             "不呼叫模型（省時省費用）。版本對應官方語言檔的 Minecraft 版本。\n"
-            "既有快取的舊譯文不受影響；要讓用語庫對舊譯文生效，\n"
-            "請手動刪除 outputs/translation_cache.json 後重新翻譯（會重新計費）。"
+            "既有快取與既有譯文會在下次翻譯時自動依用語庫修正（零 API 成本），\n"
+            "無需刪除快取。"
         )
         glossary_row.addWidget(QLabel("官方用語庫："))
         glossary_row.addWidget(self.glossary_combo)
         glossary_row.addWidget(glossary_help)
+        glossary_row.addSpacing(16)
+        self.chk_modnames = QCheckBox("模組名譯名")
+        self.chk_modnames.setChecked(True)
+        self.chk_modnames.toggled.connect(self._save_remote_settings)
+        modnames_help = _make_help_label(
+            "把常見模組名的通行繁中譯名（暮光森林、機械動力…）納入用語庫，\n"
+            "模組名不再被當成專有名詞保留英文。\n"
+            "可用「自訂用語」補充冷門模組或覆蓋預建譯名。"
+        )
+        self.custom_glossary_btn = QPushButton("自訂用語…")
+        self.custom_glossary_btn.setFixedWidth(110)
+        self.custom_glossary_btn.clicked.connect(self._open_custom_glossary)
+        glossary_row.addWidget(self.chk_modnames)
+        glossary_row.addWidget(modnames_help)
+        glossary_row.addWidget(self.custom_glossary_btn)
         glossary_row.addStretch()
 
         opt_vbox.addLayout(checkbox_row)
-        opt_vbox.addLayout(retry_row)
         opt_vbox.addLayout(glossary_row)
 
         root_layout.addWidget(options_group)
@@ -568,6 +593,7 @@ class MainWindow(QMainWindow):
         conc = _to_int(self._settings.value("model/remote_concurrency"), 16)
         batch = _to_int(self._settings.value("model/remote_batch_size"), 12)
         glossary_version = self._settings.value("options/glossary_version", "") or ""
+        modnames_on = str(self._settings.value("options/modnames_enabled", "1")) not in ("0", "false")
 
         self._loading_settings = True
         try:
@@ -576,6 +602,7 @@ class MainWindow(QMainWindow):
             self.remote_model_edit.setText(model)
             self.remote_conc_spin.setValue(conc)
             self.remote_batch_spin.setValue(batch)
+            self.chk_modnames.setChecked(modnames_on)
             if glossary_version:
                 # 找不到已儲存的版本（如檔案被移除）時保持預設（最新版）
                 idx = self.glossary_combo.findText(glossary_version)
@@ -600,6 +627,9 @@ class MainWindow(QMainWindow):
         self._settings.setValue("model/remote_concurrency", int(self.remote_conc_spin.value()))
         self._settings.setValue("model/remote_batch_size", int(self.remote_batch_spin.value()))
         self._settings.setValue("options/glossary_version", self.glossary_combo.currentText())
+        self._settings.setValue(
+            "options/modnames_enabled", "1" if self.chk_modnames.isChecked() else "0"
+        )
 
     def _on_test_connection(self):
         base = self.remote_url_edit.text().strip()
@@ -852,12 +882,79 @@ class MainWindow(QMainWindow):
         cfg.language.glossary_path = (
             glossary_data if glossary_data and glossary_data != "off" else None
         )
+        # 模組名譯名（勾選且資產存在才啟用）與使用者自訂用語
+        from modpack_translator.pipeline.glossary import (
+            default_custom_glossary_path, modnames_glossary_path,
+        )
+        cfg.language.modnames_glossary_path = None
+        if self.chk_modnames.isChecked():
+            mp = modnames_glossary_path(cfg.language.code)
+            if mp.exists():
+                cfg.language.modnames_glossary_path = str(mp)
+        cfg.language.custom_glossary_path = str(default_custom_glossary_path())
         cfg.paths.create_output_dirs()
         return cfg
 
+    def _glossary_for_pipeline(self):
+        """掃描與翻譯必須用同一套合併用語庫，否則掃描會漏掉只含
+        「命中詞英文標題」的檔案（守門讓它們變成待翻項）。"""
+        from modpack_translator.pipeline.glossary import (
+            default_custom_glossary_path, load_merged_glossary, modnames_glossary_path,
+        )
+        official = self.glossary_combo.currentData()
+        official = official if official and official != "off" else None
+        lang_code = self._cfg.language.code if self._cfg else "zh_tw"
+        mp = modnames_glossary_path(lang_code)
+        modnames = str(mp) if self.chk_modnames.isChecked() and mp.exists() else None
+        return load_merged_glossary(official, modnames, str(default_custom_glossary_path()))
+
+    def _open_custom_glossary(self):
+        from modpack_translator.gui.glossary_dialog import CustomGlossaryDialog
+
+        CustomGlossaryDialog(self).exec()
+
+    def _resolved_game_root(self):
+        from modpack_translator.pipeline.scanner import resolve_game_root
+
+        text = self.modpack_edit.text().strip()
+        if not text:
+            return None
+        root = Path(text)
+        if not root.is_dir():
+            return None
+        try:
+            return resolve_game_root(root)
+        except Exception:
+            return None
+
+    def _update_context_btn(self):
+        game_root = self._resolved_game_root()
+        self.context_btn.setEnabled(game_root is not None)
+        label = "翻譯語境…"
+        if game_root is not None:
+            from modpack_translator.pipeline.pack_context import load_pack_context
+
+            if load_pack_context(game_root).extra_prompt.strip():
+                label = "翻譯語境…（已設定）"
+        self.context_btn.setText(label)
+
+    def _open_context_dialog(self):
+        game_root = self._resolved_game_root()
+        if game_root is None:
+            return
+        from modpack_translator.gui.context_dialog import ContextDialog
+
+        ContextDialog(game_root, self).exec()
+        self._update_context_btn()
+
     def _set_busy(self, busy: bool):
         self.scan_btn.setEnabled(not busy)
-        if not busy:
+        # 翻譯進行中停用「翻譯語境…」：worker 於結束時會以開跑當下的 extra_prompt
+        # 存回 context.json，若允許中途編輯，該次存檔會覆蓋掉使用者剛存的新語境。
+        if busy:
+            self.context_btn.setEnabled(False)
+        else:
+            self._update_context_btn()
             self.translate_btn.setEnabled(len(self._scan_targets) > 0)
 
     def _update_stats_label(self):
@@ -891,6 +988,7 @@ class MainWindow(QMainWindow):
             skip_mods=not self.chk_mods.isChecked(),
             skip_quests=not self.chk_quests.isChecked(),
             lang_code=(self._cfg.language.code if self._cfg else "zh_tw"),
+            glossary=self._glossary_for_pipeline(),
         )
         self._scan_worker.log.connect(self._append_log)
         self._scan_worker.finished.connect(self._on_scan_finished)
@@ -1166,6 +1264,7 @@ class MainWindow(QMainWindow):
             self.translate_btn.setText("▶  開始翻譯")
             self._set_tone(self.translate_btn, "")
             self._set_accent("blue")
+        self._update_context_btn()
 
     def closeEvent(self, event):
         if self._translate_worker and self._translate_worker.isRunning():

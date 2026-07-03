@@ -52,3 +52,93 @@ def test_non_exact_text_goes_to_llm_with_glossary_set():
     assert tr.calls  # 有送模型（假 translator 回空字串 → 驗證失敗回退原文）
     assert result == {"k": "Go to the Nether"}
     assert n_f == 1
+
+
+def test_cached_identical_modname_replaced_without_llm():
+    g = Glossary({"Twilight Forest": "暮光森林"})
+    tr = RecordingTranslator(g)
+    ck = cache_key("Twilight Forest")
+    cache = {ck: "Twilight Forest"}  # 舊「英文→英文」快取
+    result, n_t, n_c, n_f, failed = translate_dict({"k": "Twilight Forest"}, {}, tr, cache)
+    assert result == {"k": "暮光森林"}
+    assert tr.calls == []           # 守門後由 exact_match 短路，不呼叫模型
+    assert cache[ck] == "暮光森林"
+
+
+def test_cached_translation_with_leftover_name_enforced():
+    g = Glossary({"Twilight Forest": "暮光森林"})
+    tr = RecordingTranslator(g)
+    src = "Welcome to the Twilight Forest!"
+    ck = cache_key(src)
+    cache = {ck: "歡迎來到 Twilight Forest！"}
+    result, *_ = translate_dict({"k": src}, {}, tr, cache)
+    assert result == {"k": "歡迎來到暮光森林！"}
+    assert cache[ck] == "歡迎來到暮光森林！"
+    assert tr.calls == []
+
+
+def test_model_identical_return_enforced():
+    # 原文帶驚嘆號 → exact_match 不短路 → 送模型 → 模型原樣返回
+    # （帶標點的原樣返回不觸發守門，但走專有名詞豁免後由 enforce 換上譯名）
+    g = Glossary({"Twilight Forest": "暮光森林"})
+
+    class EchoTranslator:
+        glossary = g
+
+        def translate(self, text, cancel_check=None):
+            return text
+
+    result, n_t, *_ = translate_dict({"k": "Twilight Forest!"}, {}, EchoTranslator(), {})
+    assert result == {"k": "暮光森林!"}
+
+
+def test_enforce_glossary_applies_and_preserves_tokens():
+    from modpack_translator.pipeline.runner import _enforce_glossary
+    g = Glossary({"Twilight Forest": "暮光森林"})
+    # CJK 後緊接的半形空白一併吃掉（enforce 的 CJK-空白處理）
+    assert _enforce_glossary(g, "Twilight Forest ahead", "前方 Twilight Forest") == "前方暮光森林"
+    # 含 %s 硬性 token 的譯文：替換模組名但保留 token（_preserves_required_tokens 通過）
+    assert _enforce_glossary(
+        g, "Twilight Forest %s", "前方 Twilight Forest %s"
+    ) == "前方暮光森林 %s"
+    # glossary=None 直接原樣返回
+    assert _enforce_glossary(None, "x", "y") == "y"
+
+
+def test_existing_tool_translation_enforced():
+    g = Glossary({"Twilight Forest": "暮光森林"})
+    tr = RecordingTranslator(g)
+    src = "Welcome to the Twilight Forest!"
+    old = "歡迎來到 Twilight Forest！"
+    cache = {cache_key(src): old}
+    # 既有譯文與快取一致 → 工具產物 → enforce 修復並寫回 result 與 cache
+    result, *_ = translate_dict({"k": src}, {"k": old}, tr, cache)
+    assert result["k"] == "歡迎來到暮光森林！"
+    assert cache[cache_key(src)] == "歡迎來到暮光森林！"
+    assert tr.calls == []
+
+
+def test_existing_human_translation_untouched():
+    g = Glossary({"Twilight Forest": "暮光森林"})
+    tr = RecordingTranslator(g)
+    src = "Welcome to the Twilight Forest!"
+    human = "歡迎來到 Twilight Forest！"
+    # 快取中沒有對應值（或值不同）→ 視為人工翻譯 → 不動
+    result, *_ = translate_dict({"k": src}, {"k": human}, tr, {})
+    assert "k" not in result
+    assert tr.calls == []
+
+
+def test_normalize_cache_with_glossary():
+    from modpack_translator.pipeline.runner import normalize_cache_with_glossary
+    g = Glossary({"Twilight Forest": "暮光森林", "Create": "機械動力"})
+    cache = {
+        cache_key("Twilight Forest"): "Twilight Forest",  # 覆寫
+        cache_key("Create"): "機械動力",                    # 已一致，不動
+        cache_key("Other Text"): "其他譯文",                # 非詞彙槽位，不動
+    }
+    assert normalize_cache_with_glossary(cache, g) == 1
+    assert cache[cache_key("Twilight Forest")] == "暮光森林"
+    assert cache[cache_key("Other Text")] == "其他譯文"
+    assert normalize_cache_with_glossary(cache, g) == 0  # 冪等
+    assert normalize_cache_with_glossary(cache, None) == 0

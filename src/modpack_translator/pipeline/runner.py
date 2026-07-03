@@ -23,6 +23,7 @@ from modpack_translator.pipeline.patcher import (
 )
 from modpack_translator.pipeline.postprocessor import process
 from modpack_translator.pipeline.preprocessor import (
+    _preserves_required_tokens,
     classify_translation_entry,
     decode,
     diff_keys,
@@ -42,6 +43,36 @@ from modpack_translator.pipeline.scanner import TranslationTarget
 
 def cache_key(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:24]
+
+
+def _enforce_glossary(glossary: Any, source: str, translated: str) -> str:
+    """對已通過驗證的譯文套用用語庫事後保證。
+
+    只在替換後仍保留全部硬性 token 時採用（fail-safe：替換到還原後
+    token 內容的極端情況退回原譯文，交由既有驗證處理）。
+    """
+    if glossary is None:
+        return translated
+    enforced = glossary.enforce(translated)
+    if enforced == translated or not _preserves_required_tokens(source, enforced):
+        return translated
+    return enforced
+
+
+def normalize_cache_with_glossary(cache: dict[str, str], glossary: Any) -> int:
+    """快取正規化：快取 key 是 sha256(原文) 不存原文，但用語庫的詞我們知道
+    原文——對每個詞算 cache_key 精準定位槽位，存在且不等於譯名就覆寫。
+    每輪執行時呼叫、冪等、零 API 成本；只動既存槽位，不注入新條目。
+    回傳覆寫條數。"""
+    if glossary is None:
+        return 0
+    changed = 0
+    for en, zh in glossary.terms.items():
+        ck = cache_key(en)
+        if ck in cache and cache[ck] != zh:
+            cache[ck] = zh
+            changed += 1
+    return changed
 
 
 # 用來偵測「有無可翻譯的真實字母內容」
@@ -113,9 +144,15 @@ def _translate_validated(
 
     encoded, tokens = encode(source)
     final, ok = _translate_single(translator, encoded, tokens, retry_count, cancel_check)
-    # 模型輸出關卡開啟專有名詞豁免：模型對模組名、人名等原樣返回是正確判斷
-    if ok and is_usable_translation(source, final, accept_identical_proper_noun=True):
-        return final, True
+    # 模型輸出關卡開啟專有名詞豁免：模型對模組名、人名等原樣返回是正確判斷；
+    # 但整串命中用語庫的原樣返回不放行（守門），改以官方譯名取代。
+    # 已放行的輸出再套 enforce，替換句中殘留的英文詞彙。
+    if ok and is_usable_translation(
+        source, final, accept_identical_proper_noun=True, glossary=glossary
+    ):
+        return _enforce_glossary(glossary, source, final), True
+    # 整串命中用語庫者已在呼叫模型前由上方 exact_match 短路，不會走到這裡；
+    # 故無需在模型輸出後重複 exact_match 回退。
     return source, False
 
 
@@ -255,10 +292,30 @@ def translate_dict(
     on_pair_done=None,
 ) -> tuple[dict[str, str], int, int, int, dict[str, str]]:
     """翻譯缺少/未翻譯的鍵值。回傳 (result, translated, cached, fallback, failed)。"""
-    to_translate = diff_keys(en_dict, zh_existing)
+    glossary = getattr(translator, "glossary", None)
+    pack_context = getattr(translator, "pack_context", None)
+    to_translate = diff_keys(en_dict, zh_existing, glossary=glossary)
     result: dict[str, str] = {}
     failed: dict[str, str] = {}
     n_translated = n_cached = n_fallback = 0
+
+    # 既有譯文遷移：與快取值一致代表是本工具翻的（非人工修改），
+    # 套 enforce 修復句中殘留的英文詞彙並寫回；不一致者一律不動。
+    # 不計入統計——是零成本的順帶修復，非本輪翻譯量。
+    if glossary is not None:
+        for key, existing_value in zh_existing.items():
+            if key in to_translate:
+                continue
+            src = en_dict.get(key)
+            if src is None:
+                continue
+            ck = cache_key(src)
+            if cache.get(ck) != existing_value:
+                continue
+            enforced = _enforce_glossary(glossary, src, existing_value)
+            if enforced != existing_value:
+                result[key] = enforced
+                cache[ck] = enforced
 
     for key in to_translate:
         if cancel_check is not None and cancel_check():
@@ -271,9 +328,12 @@ def translate_dict(
             continue
         ck = cache_key(src)
         if ck in cache and is_usable_translation(
-            src, cache[ck], accept_identical_proper_noun=True
+            src, cache[ck], accept_identical_proper_noun=True, glossary=glossary
         ):
-            result[key] = cache[ck]
+            value = _enforce_glossary(glossary, src, cache[ck])
+            if value != cache[ck]:
+                cache[ck] = value
+            result[key] = value
             n_cached += 1
             if on_pair_done is not None:
                 on_pair_done(1)
@@ -284,6 +344,8 @@ def translate_dict(
             result[key] = final
             cache[ck] = final
             n_translated += 1
+            if pack_context is not None:
+                pack_context.maybe_record(src, final, glossary)
         else:
             result[key] = src
             failed[key] = src
@@ -408,6 +470,8 @@ def _process_patchouli(
     if not target.path_in_jar:
         raise ValueError(f"Missing Patchouli source path for {target.source_file}")
 
+    glossary = getattr(translator, "glossary", None)
+    pack_context = getattr(translator, "pack_context", None)
     source_page = read_patchouli_page(target.source_file, target.path_in_jar)
     target_path = target.target_path_in_jar or target.path_in_jar
     if not target_path:
@@ -418,11 +482,20 @@ def _process_patchouli(
     existing_strings = read_patchouli_text(existing_page) if existing_page else {}
     for path_key, existing_value in existing_strings.items():
         source_value = source_strings.get(path_key)
-        if source_value is not None and is_usable_translation(source_value, existing_value):
-            write_patchouli_text(page, path_key, existing_value)
+        if source_value is None:
+            continue
+        if not is_usable_translation(source_value, existing_value, glossary=glossary):
+            continue
+        ck = cache_key(source_value)
+        if cache.get(ck) == existing_value:
+            enforced = _enforce_glossary(glossary, source_value, existing_value)
+            if enforced != existing_value:
+                cache[ck] = enforced
+                existing_value = enforced
+        write_patchouli_text(page, path_key, existing_value)
 
     existing_strings = read_patchouli_text(page)
-    to_translate = diff_keys(source_strings, existing_strings)
+    to_translate = diff_keys(source_strings, existing_strings, glossary=glossary)
 
     changed = page != existing_page
     failed: dict[str, str] = {}
@@ -434,9 +507,12 @@ def _process_patchouli(
         src = source_strings[path_key]
         ck = cache_key(src)
         if ck in cache and is_usable_translation(
-            src, cache[ck], accept_identical_proper_noun=True
+            src, cache[ck], accept_identical_proper_noun=True, glossary=glossary
         ):
-            write_patchouli_text(page, path_key, cache[ck])
+            value = _enforce_glossary(glossary, src, cache[ck])
+            if value != cache[ck]:
+                cache[ck] = value
+            write_patchouli_text(page, path_key, value)
             changed = True
             n_cached += 1
             if on_pair_done is not None:
@@ -449,6 +525,8 @@ def _process_patchouli(
             cache[ck] = final
             changed = True
             n_translated += 1
+            if pack_context is not None:
+                pack_context.maybe_record(src, final, glossary)
         else:
             failed[path_key] = src
             n_fallback += 1

@@ -277,18 +277,25 @@ def load_merged_glossary(
     modnames_path: str | Path | None,
     custom_path: str | Path | None,
 ) -> Glossary | None:
-    """三層合併：官方 → 模組名 → 自訂，後者覆蓋前者；自訂空譯名刪除詞條
-    （大小寫不敏感比對既有鍵）。全空時回 None。"""
+    """三層合併：官方 → 模組名 → 自訂，後者覆蓋前者；自訂空譯名刪除詞條。
+    大小寫不敏感比對既有鍵：自訂覆蓋既有詞時保留既有鍵的原始大小寫
+    （模組名/官方多為專有名詞正式大小寫、enforce 為大小寫敏感，須維持），
+    只更新譯名；既有無此詞才以自訂鍵新增。全空時回 None。"""
     terms: dict[str, str] = {}
     for p in (official_path, modnames_path):
         layer = load_glossary(p)
         if layer is not None:
             terms.update(layer.terms)
     for en, zh in load_custom_terms(custom_path).items():
+        existing = [k for k in terms if k.lower() == en.lower()]
         if zh:
-            terms[en] = zh
+            if existing:
+                for k in existing:
+                    terms[k] = zh
+            else:
+                terms[en] = zh
         else:
-            for k in [k for k in terms if k.lower() == en.lower()]:
+            for k in existing:
                 del terms[k]
     return Glossary(terms) if terms else None
 
@@ -378,14 +385,11 @@ Expected: FAIL，`assert p.exists()` 為 False
   "Storage Drawers": "儲物抽屜",
   "Iron Chests": "鐵箱子",
   "Quark": "夸克",
-  "Pam's HarvestCraft": "潘馬斯農場",
   "Astral Sorcery": "星輝魔法",
   "PneumaticCraft": "氣動工藝",
   "Alex's Mobs": "亞歷克斯的生物",
   "Supplementaries": "錦上添花",
   "Mystical Agriculture": "神秘農業",
-  "Refined Storage": "精緻儲存",
-  "Actually Additions": "實用拓展",
   "Aquaculture": "水產養殖",
   "The Aether": "天境",
   "Aether": "天境",
@@ -394,11 +398,8 @@ Expected: FAIL，`assert p.exists()` 為 False
   "Compact Machines": "緊湊機械",
   "EvilCraft": "邪惡工藝",
   "Extra Utilities": "更多實用設備",
-  "The Betweenlands": "交錯次元",
   "GregTech": "格雷科技",
-  "NuclearCraft": "核電工藝",
   "Environmental Tech": "環境科技",
-  "Integrated Dynamics": "集成動力",
   "Torchmaster": "火把大師",
   "Building Gadgets": "建築小工具",
   "Mining Gadgets": "採礦小工具",
@@ -417,7 +418,7 @@ Expected: 全部 PASS
 
 ```bash
 git add assets/glossary/modnames_zh_tw.json tests/test_glossary_merge.py
-git commit -m "feat: 預建常見模組名 zh_tw 對照表（初版 52 條，寧缺勿錯）"
+git commit -m "feat: 預建常見模組名 zh_tw 對照表（初版 46 條，寧缺勿錯）"
 ```
 
 ---
@@ -685,12 +686,13 @@ def _translate_validated(
         source, final, accept_identical_proper_noun=True, glossary=glossary
     ):
         return _enforce_glossary(glossary, source, final), True
-    if glossary is not None:
-        official = glossary.exact_match(source)
-        if official is not None and is_usable_translation(source, official):
-            return official, True
+    # 整串命中用語庫者已在呼叫模型前由上方 exact_match 短路，不會走到這裡；
+    # 故無需在模型輸出後重複 exact_match 回退。
     return source, False
 ```
+
+> 註（執行時修正）：早期草稿在模型輸出後有第二段 exact_match 回退區塊，經驗證與呼叫模型前的
+> 短路為同一決定性條件、永不可達（dead code），已移除以保持關卡函式清晰。
 
 `translate_dict` 的快取分支改為（函式開頭先取 `glossary = getattr(translator, "glossary", None)`，`to_translate` 一行改傳 `glossary`）：
 

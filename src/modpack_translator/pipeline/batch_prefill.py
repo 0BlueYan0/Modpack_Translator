@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import random
 import re
@@ -21,7 +22,10 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
+
+if TYPE_CHECKING:
+    from modpack_translator.pipeline.pack_context import PackContext
 
 import httpx
 from openai import (
@@ -42,6 +46,8 @@ from modpack_translator.pipeline.glossary import (
     _BATCH_TERM_CAP,
     Glossary,
     augment_prompt,
+    format_block,
+    merged_match_pairs,
 )
 from modpack_translator.pipeline.postprocessor import process
 from modpack_translator.pipeline.preprocessor import (
@@ -52,6 +58,7 @@ from modpack_translator.pipeline.preprocessor import (
 from modpack_translator.pipeline.remote_translator import resolve_remote_settings
 from modpack_translator.pipeline.runner import (
     _HAS_LETTER_RE,
+    _enforce_glossary,
     _static_translation,
     _translate_patchouli_text,
     _translate_segmented_text,
@@ -80,12 +87,27 @@ _BATCH_SUFFIX = (
 
 _PLACEHOLDER_RE = re.compile(r"\{[0-9]+\}")
 
+# FTB Quests lang 鍵前綴：quest.1A2B3C.title / .quest_desc[3] 等同屬一個任務
+_QUEST_GROUP_RE = re.compile(
+    r"^((?:chapter|chapter_group|quest|task|reward|reward_table|loot_crate|file)"
+    r"\.[0-9A-Fa-f]+)\."
+)
+
+
+def _group_id(target: "TranslationTarget", key: str) -> str:
+    """語義分組 id：任務類鍵以「檔案::quest.HEX」為組，其餘以檔案為組。
+    同組字串在 _build_batches 保證同批——批次本身就是鄰近語境。"""
+    m = _QUEST_GROUP_RE.match(key)
+    scope = m.group(1) if m else "__file__"
+    return f"{target.source_file}::{scope}"
+
 
 @dataclass(frozen=True)
 class PrefillItem:
     source: str  # 原始來源字串
     ck: str      # runner.cache_key(source)
     patchouli: bool = False  # 逐條救援時是否走 _translate_patchouli_text 階梯
+    group: str = ""          # 語義分組 id（同任務/同檔區塊同批，見 _build_batches）
 
 
 @dataclass
@@ -137,13 +159,13 @@ def collect_prefill_items(
             zh = read_existing_target(target, lang_code)
         except Exception:
             continue
-        for key in diff_keys(en, zh):
+        for key in diff_keys(en, zh, glossary=glossary):
             src = en[key]
             ck = cache_key(src)
             if ck in seen:
                 continue
             if ck in cache and is_usable_translation(
-                src, cache[ck], accept_identical_proper_noun=True
+                src, cache[ck], accept_identical_proper_noun=True, glossary=glossary
             ):
                 continue
             static = _static_translation(src)
@@ -160,6 +182,7 @@ def collect_prefill_items(
             items.append(PrefillItem(
                 source=src, ck=ck,
                 patchouli=target.format == "patchouli_json",
+                group=_group_id(target, key),
             ))
     return items
 
@@ -169,21 +192,56 @@ def _build_batches(
     batch_size: int,
     char_budget: int = _BATCH_CHAR_BUDGET,
 ) -> list[list[_EncodedItem]]:
+    """語義分組分批：同組（同任務/同檔區塊）不拆批——批次本身就是鄰近語境，
+    模型一次看到整個任務的標題＋描述。一批可含多組（含跨檔）維持填充率。
+    目標大小 batch_size；為容納整組允許溢出至 4/3 倍（硬上限）；
+    單組超過硬上限或字元預算時退回逐條裝箱（拆組）。
+
+    先依 group 穩定排序恢復「同組相鄰」前提——collect_prefill_items 以
+    diff_keys（回傳 set，迭代順序不保證）走訪，同任務的 title/quest_desc[*]
+    在收集順序中並不相鄰；且 round-2 的 failed_multi 依完成順序收集亦非相鄰。
+    不排序則 itertools.groupby 會把同組切成多個 run，智慧分批形同失效。
+    Python sort 穩定，組內原始相對順序保留。"""
+    items = sorted(items, key=lambda it: it.group)
+    hard_cap = batch_size + max(1, batch_size // 3)
     batches: list[list[_EncodedItem]] = []
     current: list[_EncodedItem] = []
     current_chars = 0
-    for item in items:
-        encoded, tokens = encode(item.source)
-        if current and (
-            len(current) >= batch_size or current_chars + len(encoded) > char_budget
-        ):
+
+    def _close() -> None:
+        nonlocal current, current_chars
+        if current:
             batches.append(current)
             current = []
             current_chars = 0
-        current.append(_EncodedItem(item=item, encoded=encoded, tokens=tokens))
-        current_chars += len(encoded)
-    if current:
-        batches.append(current)
+
+    for _gid, group_iter in itertools.groupby(items, key=lambda it: it.group):
+        group: list[_EncodedItem] = []
+        group_chars = 0
+        for item in group_iter:
+            encoded, tokens = encode(item.source)
+            group.append(_EncodedItem(item=item, encoded=encoded, tokens=tokens))
+            group_chars += len(encoded)
+        if len(group) > hard_cap or group_chars > char_budget:
+            # 超大組：逐條裝箱（等同舊行為，組內順序仍相鄰）
+            for enc in group:
+                if current and (
+                    len(current) >= batch_size
+                    or current_chars + len(enc.encoded) > char_budget
+                ):
+                    _close()
+                current.append(enc)
+                current_chars += len(enc.encoded)
+            continue
+        if current and (
+            len(current) + len(group) > hard_cap
+            or current_chars + group_chars > char_budget
+            or len(current) >= batch_size
+        ):
+            _close()
+        current.extend(group)
+        current_chars += group_chars
+    _close()
     return batches
 
 
@@ -372,13 +430,18 @@ def _process_batch(
     cancel_event: threading.Event,
     _sleep: Callable[[float], None],
     glossary: Glossary | None = None,
+    pack_context: "PackContext | None" = None,
 ) -> _BatchResult:
     """worker thread 進入點：請求 → 解析（不可解析時重送一次）→ 逐條驗證。"""
     try:
         max_tokens = _batch_max_tokens(batch)
-        glossary_block = "" if glossary is None else glossary.format_block(
-            glossary.match_terms(enc.encoded for enc in batch), cap=_BATCH_TERM_CAP
+        context_glossary = (
+            pack_context.learned_glossary() if pack_context is not None else None
         )
+        pairs = merged_match_pairs(
+            (glossary, context_glossary), (enc.encoded for enc in batch)
+        )
+        glossary_block = format_block(pairs, cap=_BATCH_TERM_CAP)
         mapping: dict[int, str] = {}
         unparseable = False
         for _parse_attempt in (0, 1):
@@ -402,9 +465,10 @@ def _process_batch(
                 # 與序列路徑完全相同的逐條驗證：硬性 token 保留 + 可用性檢查
                 candidate, ok = process(raw_text, enc.encoded, enc.tokens)
                 if ok and is_usable_translation(
-                    enc.item.source, candidate, accept_identical_proper_noun=True
+                    enc.item.source, candidate,
+                    accept_identical_proper_noun=True, glossary=glossary,
                 ):
-                    final = candidate
+                    final = _enforce_glossary(glossary, enc.item.source, candidate)
             results.append((enc, final))
         return _BatchResult(results=results, unparseable=unparseable)
     except TranslatorFatalError:
@@ -431,6 +495,7 @@ class _RescueTranslator:
         cancel_event: threading.Event,
         _sleep: Callable[[float], None],
         glossary: Glossary | None = None,
+        pack_context: "PackContext | None" = None,
     ) -> None:
         self._client = client
         self._cfg = cfg
@@ -439,14 +504,20 @@ class _RescueTranslator:
         self._cancel_event = cancel_event
         self._sleep = _sleep
         self.glossary = glossary  # public：runner 的短路 hook 以 getattr 取用
+        self.pack_context = pack_context  # public：每包動態語境（injection-only）
 
     def translate(self, text: str, cancel_check: Callable[[], bool] | None = None) -> str:
+        context_glossary = (
+            self.pack_context.learned_glossary() if self.pack_context is not None else None
+        )
         raw = _stream_with_backoff(
             self._client,
             self._cfg,
             self._model,
             [
-                {"role": "system", "content": augment_prompt(self._system_prompt, self.glossary, [text])},
+                {"role": "system", "content": augment_prompt(
+                    self._system_prompt, self.glossary, [text], context_glossary=context_glossary
+                )},
                 {"role": "user", "content": text},
             ],
             self._cfg.max_tokens,
@@ -491,6 +562,7 @@ class _RunContext:
     flush_cache: Callable[[], None] | None
     sleep: Callable[[float], None]
     glossary: Glossary | None = None
+    pack_context: "PackContext | None" = None
     resolved: int = 0
     since_flush: int = 0
     errors_logged: int = 0
@@ -511,6 +583,8 @@ def _settle(ctx: _RunContext, item: PrefillItem, final: str | None) -> None:
         ctx.cache[item.ck] = final
         ctx.stats.translated += 1
         ctx.since_flush += 1
+        if ctx.pack_context is not None:
+            ctx.pack_context.maybe_record(item.source, final, ctx.glossary)
     else:
         ctx.stats.failed += 1
     if ctx.flush_cache is not None and ctx.since_flush >= _FLUSH_EVERY:
@@ -536,7 +610,7 @@ def _run_batches(
     futures = [
         pool.submit(
             _process_batch, ctx.client, ctx.cfg, ctx.model, ctx.system_prompt,
-            batch, ctx.cancel_event, ctx.sleep, ctx.glossary,
+            batch, ctx.cancel_event, ctx.sleep, ctx.glossary, ctx.pack_context,
         )
         for batch in batches
     ]
@@ -575,7 +649,7 @@ def _run_rescue_round(
     """第 3 輪：逐條併發救援，結果直接最終落定（成功寫快取／失敗計 failed）。"""
     translator = _RescueTranslator(
         ctx.client, ctx.cfg, ctx.model, ctx.system_prompt, ctx.cancel_event, ctx.sleep,
-        ctx.glossary,
+        ctx.glossary, ctx.pack_context,
     )
     futures = [
         pool.submit(_rescue_item, translator, item, retry_count, ctx.cancel_event)
@@ -607,6 +681,7 @@ def run_prefill(
     on_log: Callable[[str], None] | None = None,
     flush_cache: Callable[[], None] | None = None,
     glossary: Glossary | None = None,
+    pack_context: "PackContext | None" = None,
     _sleep: Callable[[float], None] = time.sleep,
 ) -> PrefillStats:
     """三輪收斂翻譯 items：批次 → 縮小批次重試 → 併發逐條救援。
@@ -644,7 +719,7 @@ def run_prefill(
         cache=cache, stats=stats, total=len(items),
         cancel_event=threading.Event(), cancel_check=cancel_check,
         on_progress=on_progress, on_log=on_log, flush_cache=flush_cache,
-        sleep=_sleep, glossary=glossary,
+        sleep=_sleep, glossary=glossary, pack_context=pack_context,
     )
     pool = ThreadPoolExecutor(max_workers=cfg.remote_concurrency)
     try:
@@ -699,6 +774,7 @@ def prefill_translation_cache(
     on_log: Callable[[str], None] | None = None,
     flush_cache: Callable[[], None] | None = None,
     glossary: Glossary | None = None,
+    pack_context: "PackContext | None" = None,
     _sleep: Callable[[float], None] = time.sleep,
 ) -> PrefillStats:
     """GUI 與 CLI 共用的入口：remote 模式且開關開啟才收集並執行預翻譯。"""
@@ -721,6 +797,7 @@ def prefill_translation_cache(
         on_log=on_log,
         flush_cache=flush_cache,
         glossary=glossary,
+        pack_context=pack_context,
         _sleep=_sleep,
     )
     elapsed = time.monotonic() - start

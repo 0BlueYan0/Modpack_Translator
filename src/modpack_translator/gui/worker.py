@@ -10,16 +10,18 @@ from PySide6.QtCore import QThread, Signal
 
 from modpack_translator.config import AppConfig
 from modpack_translator.pipeline.batch_prefill import prefill_translation_cache
-from modpack_translator.pipeline.glossary import load_glossary
+from modpack_translator.pipeline.glossary import Glossary, load_merged_glossary
 from modpack_translator.pipeline.patcher import (
     backup_mods,
     backup_quest_configs,
     patch_modonomicon_unicode_fonts,
 )
+from modpack_translator.pipeline.pack_context import load_pack_context
 from modpack_translator.pipeline.preprocessor import diff_keys
 from modpack_translator.pipeline.runner import (
     _write_failed_items,
     failed_target_name,
+    normalize_cache_with_glossary,
     process_target,
     read_existing_target,
     read_target_strings,
@@ -42,7 +44,11 @@ def _flush_cache(cache_path: Path, cache: dict[str, str]) -> None:
     cache_path.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _filter_pending_targets(all_targets: list[TranslationTarget], lang_code: str) -> list[TranslationTarget]:
+def _filter_pending_targets(
+    all_targets: list[TranslationTarget],
+    lang_code: str,
+    glossary: Glossary | None = None,
+) -> list[TranslationTarget]:
     pending: list[TranslationTarget] = []
     for target in all_targets:
         try:
@@ -51,7 +57,7 @@ def _filter_pending_targets(all_targets: list[TranslationTarget], lang_code: str
         except Exception:
             pending.append(target)
             continue
-        if diff_keys(strings, existing):
+        if diff_keys(strings, existing, glossary=glossary):
             pending.append(target)
     return pending
 
@@ -61,12 +67,14 @@ class ScanWorker(QThread):
     finished = Signal(list, dict, int, dict)  # targets, format_counts, total_pairs, samples
     error    = Signal(str)
 
-    def __init__(self, modpack_path: Path, skip_mods: bool, skip_quests: bool, lang_code: str = "zh_tw"):
+    def __init__(self, modpack_path: Path, skip_mods: bool, skip_quests: bool, lang_code: str = "zh_tw",
+                 glossary: Glossary | None = None):
         super().__init__()
         self._modpack_path = modpack_path
         self._skip_mods    = skip_mods
         self._skip_quests  = skip_quests
         self._lang_code    = lang_code
+        self._glossary     = glossary
 
     def run(self):
         try:
@@ -75,7 +83,10 @@ class ScanWorker(QThread):
             root = scanner._resolve_game_root(self._modpack_path)
             self.log.emit(f"偵測到遊戲根目錄：{root}")
 
-            targets = _filter_pending_targets(scanner.scan(self._modpack_path, self._lang_code), self._lang_code)
+            targets = _filter_pending_targets(
+                scanner.scan(self._modpack_path, self._lang_code, self._glossary),
+                self._lang_code, self._glossary,
+            )
 
             if self._skip_mods:
                 targets = [t for t in targets if t.output_mode != "jar_inject"]
@@ -97,7 +108,7 @@ class ScanWorker(QThread):
                     existing = read_existing_target(target, self._lang_code)
                 except Exception:
                     continue
-                pending_keys = diff_keys(strings, existing)
+                pending_keys = diff_keys(strings, existing, glossary=self._glossary)
                 pending = {k: strings[k] for k in pending_keys}
 
                 fmt = target.format
@@ -167,14 +178,36 @@ class TranslateWorker(QThread):
                 backed_up = backup_quest_configs(game_root)
                 self.log.emit(f"已備份 {backed_up} 個任務/設定資料夾至 quests_bak/")
 
-            # 官方用語庫：載入與 regex 編譯皆在 worker 執行緒內，建構後不可變、跨執行緒安全
+            # 每包語境：extra_prompt 併入 system prompt 靜態段（cache 友善：
+            # [Glossary] 動態區塊永遠在其後），learned_terms 供動態注入
+            pack_context = load_pack_context(game_root)
+            system_prompt = self._cfg.language.system_prompt
+            if pack_context.extra_prompt.strip():
+                system_prompt = (
+                    system_prompt + "\n\n[Pack context]\n" + pack_context.extra_prompt.strip()
+                )
+                self.log.emit("已載入此包的翻譯語境提示詞。")
+            if pack_context.learned_count():
+                self.log.emit(f"已載入此包 {pack_context.learned_count()} 條學習譯法。")
+
+            # 用語庫：官方＋模組名＋自訂三層合併；載入與 regex 編譯皆在
+            # worker 執行緒內，建構後不可變、跨執行緒安全
             glossary = None
-            if self._cfg.language.glossary_path:
-                glossary = load_glossary(self._cfg.language.glossary_path)
+            lang = self._cfg.language
+            if lang.glossary_path or lang.modnames_glossary_path or lang.custom_glossary_path:
+                glossary = load_merged_glossary(
+                    lang.glossary_path, lang.modnames_glossary_path, lang.custom_glossary_path
+                )
                 if glossary is not None:
-                    self.log.emit(f"已載入官方用語庫：{len(glossary.terms):,} 條")
+                    self.log.emit(f"已載入用語庫：{len(glossary.terms):,} 條（官方＋模組名＋自訂）")
                 else:
-                    self.log.emit("[警告] 無法載入官方用語庫，本次翻譯不使用用語庫。")
+                    self.log.emit("[警告] 無法載入用語庫，本次翻譯不使用用語庫。")
+
+            # 快取正規化：依用語庫覆寫既有詞彙槽位（零 API 成本、冪等）
+            fixed = normalize_cache_with_glossary(cache, glossary)
+            if fixed:
+                self.log.emit(f"已依用語庫正規化 {fixed:,} 條既有快取（零 API 成本）。")
+                _flush_cache(cache_path, cache)
 
             if self._cfg.model.backend_mode == "remote":
                 self.log.emit("正在連線遠端 API，請稍候…")
@@ -183,7 +216,7 @@ class TranslateWorker(QThread):
             translator = None
             try:
                 translator = build_translator(
-                    self._cfg.model, self._cfg.language.system_prompt, glossary
+                    self._cfg.model, system_prompt, glossary, pack_context
                 )
                 self._translator = translator
             except Exception as exc:
@@ -200,7 +233,7 @@ class TranslateWorker(QThread):
                     prefill_stats = prefill_translation_cache(
                         self._targets,
                         self._cfg.model,
-                        self._cfg.language.system_prompt,
+                        system_prompt,
                         self._cfg.language.code,
                         cache,
                         retry_count=self._retry_count,
@@ -209,6 +242,7 @@ class TranslateWorker(QThread):
                         on_log=self.log.emit,
                         flush_cache=lambda: _flush_cache(cache_path, cache),
                         glossary=glossary,
+                        pack_context=pack_context,
                     )
                     prefill_translated = prefill_stats.translated
                     _flush_cache(cache_path, cache)
@@ -273,6 +307,15 @@ class TranslateWorker(QThread):
                     failed_files_written, prefill_translated,
                 )
             finally:
+                try:
+                    pack_context.save()
+                    if pack_context.learned_count():
+                        self.log.emit(
+                            f"本包已累積 {pack_context.learned_count()} 條學習譯法"
+                            "（存於包內 .modpack_translator/context.json）。"
+                        )
+                except OSError as exc:
+                    self.log.emit(f"[警告] 包語境存檔失敗：{exc}")
                 translator.close()
                 self._translator = None
 

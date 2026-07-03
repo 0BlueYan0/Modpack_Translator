@@ -16,6 +16,7 @@ from modpack_translator.pipeline._chat import normalize_base_url, stream_chat
 from modpack_translator.pipeline.glossary import Glossary, augment_prompt
 
 if TYPE_CHECKING:
+    from modpack_translator.pipeline.pack_context import PackContext
     from modpack_translator.pipeline.remote_translator import RemoteTranslator
 
 _PROJECT_ROOT = Path(__file__).parents[3]
@@ -264,12 +265,14 @@ def _backend_help_from_log(detail: str) -> str:
 class GGUFTranslator:
     # 類別層級預設：測試以 __new__ 跳過 __init__ 時仍可安全讀取
     glossary: Glossary | None = None
+    pack_context: "PackContext | None" = None
 
     def __init__(
         self,
         cfg: ModelConfig,
         system_prompt: str,
         glossary: Glossary | None = None,
+        pack_context: "PackContext | None" = None,
     ) -> None:
         from openai import OpenAI
 
@@ -348,6 +351,7 @@ class GGUFTranslator:
         self._system_prompt = system_prompt
         self._cfg = cfg
         self.glossary = glossary  # public：runner 以 getattr 取用做整串短路
+        self.pack_context = pack_context  # public：每包動態語境（injection-only）
 
     def close(self) -> None:
         if self._server_process is None:
@@ -416,7 +420,13 @@ class GGUFTranslator:
         return stream_chat(
             self._client,
             self._model,
-            augment_prompt(self._system_prompt, self.glossary, [text]),
+            augment_prompt(
+                self._system_prompt, self.glossary, [text],
+                context_glossary=(
+                    self.pack_context.learned_glossary()
+                    if self.pack_context is not None else None
+                ),
+            ),
             text,
             max_tokens=self._cfg.max_tokens,
             temperature=self._cfg.temperature,
@@ -429,9 +439,10 @@ def build_translator(
     cfg: ModelConfig,
     system_prompt: str,
     glossary: "Glossary | None" = None,
+    pack_context: "PackContext | None" = None,
 ) -> "GGUFTranslator | RemoteTranslator":
     """依 backend_mode 回傳對應的 translator。介面一致：translate() / close() / context manager。"""
     if cfg.backend_mode == "remote":
         from modpack_translator.pipeline.remote_translator import RemoteTranslator
-        return RemoteTranslator(cfg, system_prompt, glossary)
-    return GGUFTranslator(cfg, system_prompt, glossary)
+        return RemoteTranslator(cfg, system_prompt, glossary, pack_context)
+    return GGUFTranslator(cfg, system_prompt, glossary, pack_context)
