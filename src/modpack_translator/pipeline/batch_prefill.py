@@ -52,6 +52,7 @@ from modpack_translator.pipeline.preprocessor import (
 from modpack_translator.pipeline.remote_translator import resolve_remote_settings
 from modpack_translator.pipeline.runner import (
     _HAS_LETTER_RE,
+    _enforce_glossary,
     _static_translation,
     _translate_patchouli_text,
     _translate_segmented_text,
@@ -137,13 +138,13 @@ def collect_prefill_items(
             zh = read_existing_target(target, lang_code)
         except Exception:
             continue
-        for key in diff_keys(en, zh):
+        for key in diff_keys(en, zh, glossary=glossary):
             src = en[key]
             ck = cache_key(src)
             if ck in seen:
                 continue
             if ck in cache and is_usable_translation(
-                src, cache[ck], accept_identical_proper_noun=True
+                src, cache[ck], accept_identical_proper_noun=True, glossary=glossary
             ):
                 continue
             static = _static_translation(src)
@@ -402,9 +403,10 @@ def _process_batch(
                 # 與序列路徑完全相同的逐條驗證：硬性 token 保留 + 可用性檢查
                 candidate, ok = process(raw_text, enc.encoded, enc.tokens)
                 if ok and is_usable_translation(
-                    enc.item.source, candidate, accept_identical_proper_noun=True
+                    enc.item.source, candidate,
+                    accept_identical_proper_noun=True, glossary=glossary,
                 ):
-                    final = candidate
+                    final = _enforce_glossary(glossary, enc.item.source, candidate)
             results.append((enc, final))
         return _BatchResult(results=results, unparseable=unparseable)
     except TranslatorFatalError:
