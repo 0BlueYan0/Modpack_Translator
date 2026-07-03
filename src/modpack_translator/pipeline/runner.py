@@ -23,6 +23,7 @@ from modpack_translator.pipeline.patcher import (
 )
 from modpack_translator.pipeline.postprocessor import process
 from modpack_translator.pipeline.preprocessor import (
+    _preserves_required_tokens,
     classify_translation_entry,
     decode,
     diff_keys,
@@ -42,6 +43,20 @@ from modpack_translator.pipeline.scanner import TranslationTarget
 
 def cache_key(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:24]
+
+
+def _enforce_glossary(glossary: Any, source: str, translated: str) -> str:
+    """對已通過驗證的譯文套用用語庫事後保證。
+
+    只在替換後仍保留全部硬性 token 時採用（fail-safe：替換到還原後
+    token 內容的極端情況退回原譯文，交由既有驗證處理）。
+    """
+    if glossary is None:
+        return translated
+    enforced = glossary.enforce(translated)
+    if enforced == translated or not _preserves_required_tokens(source, enforced):
+        return translated
+    return enforced
 
 
 # 用來偵測「有無可翻譯的真實字母內容」
@@ -113,9 +128,17 @@ def _translate_validated(
 
     encoded, tokens = encode(source)
     final, ok = _translate_single(translator, encoded, tokens, retry_count, cancel_check)
-    # 模型輸出關卡開啟專有名詞豁免：模型對模組名、人名等原樣返回是正確判斷
-    if ok and is_usable_translation(source, final, accept_identical_proper_noun=True):
-        return final, True
+    # 模型輸出關卡開啟專有名詞豁免：模型對模組名、人名等原樣返回是正確判斷；
+    # 但整串命中用語庫的原樣返回不放行（守門），改以官方譯名取代。
+    # 已放行的輸出再套 enforce，替換句中殘留的英文詞彙。
+    if ok and is_usable_translation(
+        source, final, accept_identical_proper_noun=True, glossary=glossary
+    ):
+        return _enforce_glossary(glossary, source, final), True
+    if glossary is not None:
+        official = glossary.exact_match(source)
+        if official is not None and is_usable_translation(source, official):
+            return official, True
     return source, False
 
 
@@ -255,7 +278,8 @@ def translate_dict(
     on_pair_done=None,
 ) -> tuple[dict[str, str], int, int, int, dict[str, str]]:
     """翻譯缺少/未翻譯的鍵值。回傳 (result, translated, cached, fallback, failed)。"""
-    to_translate = diff_keys(en_dict, zh_existing)
+    glossary = getattr(translator, "glossary", None)
+    to_translate = diff_keys(en_dict, zh_existing, glossary=glossary)
     result: dict[str, str] = {}
     failed: dict[str, str] = {}
     n_translated = n_cached = n_fallback = 0
@@ -271,9 +295,12 @@ def translate_dict(
             continue
         ck = cache_key(src)
         if ck in cache and is_usable_translation(
-            src, cache[ck], accept_identical_proper_noun=True
+            src, cache[ck], accept_identical_proper_noun=True, glossary=glossary
         ):
-            result[key] = cache[ck]
+            value = _enforce_glossary(glossary, src, cache[ck])
+            if value != cache[ck]:
+                cache[ck] = value
+            result[key] = value
             n_cached += 1
             if on_pair_done is not None:
                 on_pair_done(1)
