@@ -495,7 +495,7 @@ def _process_patchouli(
         write_patchouli_text(page, path_key, existing_value)
 
     existing_strings = read_patchouli_text(page)
-    to_translate = diff_keys(source_strings, existing_strings)
+    to_translate = diff_keys(source_strings, existing_strings, glossary=glossary)
 
     changed = page != existing_page
     failed: dict[str, str] = {}

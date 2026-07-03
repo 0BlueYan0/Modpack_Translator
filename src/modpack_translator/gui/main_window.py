@@ -949,7 +949,12 @@ class MainWindow(QMainWindow):
 
     def _set_busy(self, busy: bool):
         self.scan_btn.setEnabled(not busy)
-        if not busy:
+        # 翻譯進行中停用「翻譯語境…」：worker 於結束時會以開跑當下的 extra_prompt
+        # 存回 context.json，若允許中途編輯，該次存檔會覆蓋掉使用者剛存的新語境。
+        if busy:
+            self.context_btn.setEnabled(False)
+        else:
+            self._update_context_btn()
             self.translate_btn.setEnabled(len(self._scan_targets) > 0)
 
     def _update_stats_label(self):
