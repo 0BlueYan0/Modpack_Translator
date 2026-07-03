@@ -85,6 +85,10 @@ class LanguageConfig(BaseModel):
     system_prompt: str
     # 官方用語庫對照表路徑（相對專案根）；None/空字串＝停用
     glossary_path: str | None = None
+    # 模組名譯名對照表路徑；None＝停用
+    modnames_glossary_path: str | None = None
+    # 使用者自訂用語檔路徑；None＝停用
+    custom_glossary_path: str | None = None
 
 
 class AppConfig(BaseModel):
