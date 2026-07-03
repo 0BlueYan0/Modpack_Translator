@@ -197,6 +197,63 @@ def load_glossary(path: str | Path | None) -> Glossary | None:
     return Glossary(terms)
 
 
+def load_custom_terms(path: str | Path | None) -> dict[str, str]:
+    """讀取自訂用語 JSON（en→zh）。zh 空字串是合法值（＝刪除該詞條），
+    必須保留給合併器判讀。缺檔、壞檔回空 dict。"""
+    if not path:
+        return {}
+    p = Path(path).expanduser()
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        en.strip(): zh.strip()
+        for en, zh in data.items()
+        if isinstance(en, str) and isinstance(zh, str) and en.strip()
+    }
+
+
+def save_custom_terms(path: str | Path, terms: dict[str, str]) -> None:
+    p = Path(path).expanduser()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(
+        json.dumps(terms, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+
+
+def load_merged_glossary(
+    official_path: str | Path | None,
+    modnames_path: str | Path | None,
+    custom_path: str | Path | None,
+) -> Glossary | None:
+    """三層合併：官方 → 模組名 → 自訂，後者覆蓋前者；自訂空譯名刪除詞條
+    （大小寫不敏感比對既有鍵）。全空時回 None。"""
+    terms: dict[str, str] = {}
+    for p in (official_path, modnames_path):
+        layer = load_glossary(p)
+        if layer is not None:
+            terms.update(layer.terms)
+    for en, zh in load_custom_terms(custom_path).items():
+        if zh:
+            terms[en] = zh
+        else:
+            for k in [k for k in terms if k.lower() == en.lower()]:
+                del terms[k]
+    return Glossary(terms) if terms else None
+
+
+def modnames_glossary_path(lang_code: str) -> Path:
+    return _GLOSSARY_DIR / f"modnames_{lang_code}.json"
+
+
+def default_custom_glossary_path() -> Path:
+    """使用者級自訂用語檔：住家目錄下，更新/重灌程式都不會被清掉。"""
+    return Path.home() / ".modpack_translator" / "custom_glossary.json"
+
+
 def _version_sort_key(version: str) -> tuple[int, ...]:
     return tuple(int(piece) if piece.isdigit() else -1 for piece in version.split("."))
 
