@@ -7,6 +7,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+from modpack_translator.pipeline import mdx
 from modpack_translator.pipeline.patcher import (
     read_jar_json_file,
     read_jar_json_lang,
@@ -20,6 +21,7 @@ from modpack_translator.pipeline.patcher import (
     write_jar_json_file,
     write_jar_json_lang,
     write_jar_legacy_lang,
+    write_jar_text,
 )
 from modpack_translator.pipeline.postprocessor import process
 from modpack_translator.pipeline.preprocessor import (
@@ -31,6 +33,7 @@ from modpack_translator.pipeline.preprocessor import (
     jar_member_exists,
     read_inline_snbt_text,
     is_usable_translation,
+    read_jar_text,
     read_legacy_lang,
     read_bq_lang,
     read_json_lang,
@@ -417,6 +420,8 @@ def read_target_strings(target: TranslationTarget) -> dict[str, str]:
         return read_bq_lang(target.source_file)
     elif target.format == "kubejs_json":
         return read_json_lang(target.source_file, None)
+    elif target.format == "oracle_mdx":
+        return mdx.extract_mdx(read_jar_text(target.source_file, target.path_in_jar))
     return {}
 
 
@@ -434,6 +439,13 @@ def read_existing_target(target: TranslationTarget, lang_code: str) -> dict[str,
         if target.format == "patchouli_json":
             page = read_jar_json_file(target.source_file, existing_path)
             return read_patchouli_text(page)
+        if target.format == "oracle_mdx":
+            if not existing_path:
+                return {}
+            try:
+                return mdx.extract_mdx(read_jar_text(target.source_file, existing_path))
+            except (KeyError, OSError):
+                return {}
         return {}
 
     existing_file = target.existing_file
@@ -472,6 +484,9 @@ def process_target(
     """處理單一翻譯目標。回傳 (translated, cached, fallback, failed)。"""
     if target.format == "patchouli_json":
         return _process_patchouli(target, translator, cache, retry_count, cancel_check, on_pair_done)
+
+    if target.format == "oracle_mdx":
+        return _process_oracle_mdx(target, translator, cache, retry_count, cancel_check, on_pair_done)
 
     if target.format == "json_lang":
         en_dict = read_json_lang(target.source_file, target.path_in_jar)
@@ -611,6 +626,35 @@ def _process_patchouli(
             raise ValueError("Patchouli resource pack output is no longer supported")
         write_jar_json_file(target.source_file, target_path, page)
 
+    return n_translated, n_cached, n_fallback, failed
+
+
+def _process_oracle_mdx(
+    target: TranslationTarget,
+    translator: Any,
+    cache: dict[str, str],
+    retry_count: int = 0,
+    cancel_check=None,
+    on_pair_done=None,
+) -> tuple[int, int, int, dict[str, str]]:
+    raw = read_jar_text(target.source_file, target.path_in_jar)
+    en = mdx.extract_mdx(raw)
+    if not en:
+        return 0, 0, 0, {}
+    zh_existing = read_existing_target(target, target.output_lang_code)
+    result, n_translated, n_cached, n_fallback, failed = translate_dict(
+        en, zh_existing, translator, cache, retry_count, cancel_check, on_pair_done
+    )
+    merged = {**zh_existing, **result}
+    should_write = bool(result) or (
+        bool(zh_existing) and not jar_member_exists(target.source_file, target.target_path_in_jar)
+    )
+    if should_write:
+        new_raw = mdx.rebuild_mdx(raw, merged)
+        # 內容未變則不重寫(避免 re-run 無謂改動 jar)
+        if not (jar_member_exists(target.source_file, target.target_path_in_jar)
+                and read_jar_text(target.source_file, target.target_path_in_jar) == new_raw):
+            write_jar_text(target.source_file, target.target_path_in_jar, new_raw)
     return n_translated, n_cached, n_fallback, failed
 
 
