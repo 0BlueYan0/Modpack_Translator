@@ -31,7 +31,7 @@ def _segments(raw: str) -> list[tuple[str | None, str]]:
         body = raw[m.end():]
     else:
         body = raw
-    out.append((None, body))  # 本任務：正文整段保留（後續任務細分）
+    _body_segments(body, out, ctr)
     return out
 
 
@@ -80,3 +80,37 @@ def _frontmatter_segments(fm: str, out: list, ctr: list[int]) -> None:
             out.append((None, mt.group(3)))               # 尾隨
             continue
         out.append((None, line))                          # id/type/related_items/custom 值…
+
+
+_HEADING_RE = re.compile(r"^([ \t]*#{1,6}[ \t]+)(.*)$", re.S)
+_LIST_RE = re.compile(r"^([ \t]*(?:[-*+]|\d+\.)[ \t]+)(.*)$", re.S)
+_JSX_OPEN_RE = re.compile(r"^[ \t]*<[A-Za-z][A-Za-z0-9]*")
+
+
+def _push_paragraph(out: list, ctr: list[int], lines: list[str]) -> None:
+    if lines:
+        _push_text(out, ctr, "".join(lines))
+
+
+def _body_segments(body: str, out: list, ctr: list[int]) -> None:
+    lines = body.splitlines(keepends=True)
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if not line.strip():
+            out.append((None, line)); i += 1; continue
+        if _JSX_OPEN_RE.match(line):
+            out.append((None, line)); i += 1; continue   # 本任務：JSX 行先原樣保留（Task 3 細分）
+        mh = _HEADING_RE.match(line)
+        if mh:
+            out.append((None, mh.group(1))); _push_text(out, ctr, mh.group(2)); i += 1; continue
+        ml = _LIST_RE.match(line)
+        if ml:
+            out.append((None, ml.group(1))); _push_text(out, ctr, ml.group(2)); i += 1; continue
+        para: list[str] = []
+        while i < len(lines):
+            l = lines[i]
+            if (not l.strip()) or _JSX_OPEN_RE.match(l) or _HEADING_RE.match(l) or _LIST_RE.match(l):
+                break
+            para.append(l); i += 1
+        _push_paragraph(out, ctr, para)

@@ -34,3 +34,32 @@ def test_frontmatter_rebuild_applies_translation():
     assert "id: oritech:chainsaw\r\n" in out          # 保留
     assert "type: item\r\n" in out                     # 保留
     assert "    Charge speed: \"512 RF/t\"\r\n" in out  # 未譯者原樣
+
+BODY = (
+    "---\r\ntitle: X\r\ntype: item\r\nid: m:x\r\n---\r\n"
+    "\r\n"
+    "The chainsaw is a fast tool. It also\r\n"
+    "works as a sword.\r\n"
+    "\r\n"
+    "### How to use\r\n"
+    "\r\n"
+    "- Charge it in a [charger](@oritech:charger_block).\r\n"
+    "- Hold **Shift** to fell trees.\r\n"
+)
+
+def test_body_prose_blocks_extracted():
+    vals = list(extract_mdx(BODY).values())
+    assert "The chainsaw is a fast tool. It also\r\nworks as a sword." in vals  # 段落含軟換行
+    assert "How to use" in vals                                                # 標題文字
+    assert "Charge it in a [charger](@oritech:charger_block)." in vals          # 清單項含連結原文
+    assert "Hold **Shift** to fell trees." in vals
+
+def test_body_markers_preserved_on_rebuild():
+    got = extract_mdx(BODY)
+    hk = next(k for k, v in got.items() if v == "How to use")
+    out = rebuild_mdx(BODY, {hk: "如何使用"})
+    assert "### 如何使用\r\n" in out       # 保留 "### " 與換行
+    assert "- Charge it in a [charger]" in out  # 清單標記保留
+
+def test_body_rebuild_exact_when_no_translation():
+    assert rebuild_mdx(BODY, {}) == BODY
