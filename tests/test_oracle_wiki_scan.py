@@ -18,7 +18,7 @@ def test_scan_emits_oracle_mdx_and_meta_targets(tmp_path):
     for t in targets:
         by_fmt.setdefault(t.format, []).append(t)
     mdx = by_fmt.get("oracle_mdx", [])
-    meta = [t for t in by_fmt.get("json_lang", []) if t.path_in_jar.endswith("_meta.json")]
+    meta = [t for t in by_fmt.get("oracle_meta", []) if t.path_in_jar.endswith("_meta.json")]
     assert len(mdx) == 1
     assert mdx[0].target_path_in_jar == "assets/oracle_index/books/oritech/translated/zh_tw/content/equipment/chainsaw.mdx"
     assert mdx[0].existing_path_in_jar is None

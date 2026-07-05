@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 
 # frontmatter：開頭 ---\n … \n---\n（容忍 CRLF 與結尾空白）
@@ -18,6 +19,36 @@ def rebuild_mdx(raw: str, translations: dict[str, str]) -> str:
         (translations.get(k, t) if k is not None else t)
         for k, t in _segments(raw)
     )
+
+
+def extract_meta(raw: str) -> dict[str, str]:
+    """Oracle _meta.json → 可翻標題 dict。值為字串取其身;值為 {"name": str,...} 取 name。其餘(icon/null)不列入。"""
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, str] = {}
+    for k, v in data.items():
+        if isinstance(v, str):
+            out[k] = v
+        elif isinstance(v, dict) and isinstance(v.get("name"), str):
+            out[k] = v["name"]
+    return out
+
+
+def rebuild_meta(raw: str, translations: dict[str, str]) -> str:
+    """把譯文填回 _meta.json,保留鍵順序與 dict 值的其他欄位(icon 等),不丟任何鍵。"""
+    data = json.loads(raw)
+    for k, v in data.items():
+        if k not in translations:
+            continue
+        if isinstance(v, str):
+            data[k] = translations[k]
+        elif isinstance(v, dict) and isinstance(v.get("name"), str):
+            v["name"] = translations[k]
+    return json.dumps(data, ensure_ascii=False, indent=2)
 
 
 def _segments(raw: str) -> list[tuple[str | None, str]]:

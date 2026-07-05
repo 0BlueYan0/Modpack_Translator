@@ -22,7 +22,7 @@ class TranslationTarget:
     source_file: Path
     path_in_jar: str | None
     mod_id: str
-    format: str       # json_lang | legacy_lang | patchouli_json | ftbq_snbt | ftbq_inline_snbt | heracles_snbt | heracles_inline_snbt | bq_lang | kubejs_json | oracle_mdx
+    format: str       # json_lang | legacy_lang | patchouli_json | ftbq_snbt | ftbq_inline_snbt | heracles_snbt | heracles_inline_snbt | bq_lang | kubejs_json | oracle_mdx | oracle_meta
     output_mode: str  # jar_inject | in_place
     output_lang_code: str = "zh_tw"
     target_path_in_jar: str | None = None      # 寫入目標:一律正規小寫（遊戲讀得到）
@@ -277,11 +277,11 @@ class ModpackScanner:
                 target_path_in_jar=write, existing_path_in_jar=existing,
             )
         if parts[-1] == "_meta.json":
-            if not self._jar_lang_needs_translation(zf, name, existing, "json", glossary):
+            if not self._oracle_meta_needs_translation(zf, name, existing, glossary):
                 return None
             return TranslationTarget(
                 source_file=jar_path, path_in_jar=name, mod_id=book,
-                format="json_lang", output_mode="jar_inject",
+                format="oracle_meta", output_mode="jar_inject",
                 output_lang_code=lang_code,
                 target_path_in_jar=write, existing_path_in_jar=existing,
             )
@@ -300,6 +300,23 @@ class ModpackScanner:
         if existing_path and existing_path in zf.namelist():
             try:
                 existing = mdx.extract_mdx(zf.read(existing_path).decode("utf-8-sig"))
+            except (KeyError, UnicodeDecodeError):
+                existing = {}
+        return bool(diff_keys(source, existing, glossary=glossary))
+
+    def _oracle_meta_needs_translation(self, zf, source_path, existing_path, glossary) -> bool:
+        if getattr(self, "_include_translated", False):
+            return True
+        try:
+            source = mdx.extract_meta(zf.read(source_path).decode("utf-8-sig"))
+        except (KeyError, UnicodeDecodeError):
+            return False
+        if not source:
+            return False
+        existing = {}
+        if existing_path and existing_path in zf.namelist():
+            try:
+                existing = mdx.extract_meta(zf.read(existing_path).decode("utf-8-sig"))
             except (KeyError, UnicodeDecodeError):
                 existing = {}
         return bool(diff_keys(source, existing, glossary=glossary))
