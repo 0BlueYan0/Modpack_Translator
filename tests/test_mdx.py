@@ -123,3 +123,38 @@ def test_jsx_structure_preserved_and_only_callout_translated():
 
 def test_jsx_rebuild_exact_when_no_translation():
     assert rebuild_mdx(JSX, {}) == JSX
+
+REAL = (  # 濃縮自 oritech content/equipment/chainsaw.mdx 的代表結構
+    "---\r\n"
+    "id: oritech:chainsaw\r\n"
+    "title: Chainsaw\r\n"
+    "type: item\r\n"
+    "custom:\r\n"
+    "    RF Capacity: \"10,000\"\r\n"
+    "---\r\n"
+    "\r\n"
+    "The chainsaw is a fast tool for harvesting wood. It functions as an axe\r\n"
+    "that never breaks.\r\n"
+    "\r\n"
+    "<Callout variant=\"info\">\r\n"
+    "    The forests will fall.\r\n"
+    "</Callout>\r\n"
+    "\r\n"
+    "### How to use\r\n"
+    "\r\n"
+    "Charge the chainsaw in a [charger](@oritech:charger_block).\r\n"
+)
+
+def test_identity_rebuild_reproduces_source_byte_for_byte():
+    assert rebuild_mdx(REAL, {}) == REAL
+
+def test_link_target_preserved_when_link_text_translated():
+    got = extract_mdx(REAL)
+    k = next(key for key, v in got.items() if v.startswith("Charge the chainsaw"))
+    out = rebuild_mdx(REAL, {k: "在[充電器](@oritech:charger_block)中充電。"})
+    assert "(@oritech:charger_block)" in out
+
+def test_all_extracted_values_are_nonempty_prose():
+    for v in extract_mdx(REAL).values():
+        assert v.strip()                     # 無空白段
+        assert not v.lstrip().startswith("<")  # 未把 JSX 標籤當可翻
