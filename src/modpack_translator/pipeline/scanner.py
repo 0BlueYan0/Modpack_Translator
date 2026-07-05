@@ -24,8 +24,10 @@ class TranslationTarget:
     format: str       # json_lang | legacy_lang | patchouli_json | ftbq_snbt | ftbq_inline_snbt | heracles_snbt | heracles_inline_snbt | bq_lang | kubejs_json
     output_mode: str  # jar_inject | in_place
     output_lang_code: str = "zh_tw"
-    target_path_in_jar: str | None = None
-    target_file: Path | None = None
+    target_path_in_jar: str | None = None      # 寫入目標:一律正規小寫（遊戲讀得到）
+    target_file: Path | None = None            # 寫入目標:一律正規小寫
+    existing_path_in_jar: str | None = None    # 既有譯檔（可能大寫 zh_TW），供重用/diff
+    existing_file: Path | None = None          # 既有譯檔（可能大寫），供重用/diff
 
 
 def resolve_game_root(path: Path) -> Path:
@@ -88,8 +90,10 @@ class ModpackScanner:
                     lang_ext = self._source_lang_extension(parts)
                     if lang_ext:
                         mod_id = parts[1]
-                        target_path = self._target_lang_path(name, lang_code, name_set)
-                        if self._jar_lang_needs_translation(zf, name, target_path, lang_ext, glossary):
+                        existing_path = self._existing_lang_path(name, lang_code, name_set)
+                        write_path = self._canonical_lang_path(name, lang_code)
+                        needs = self._jar_lang_needs_translation(zf, name, existing_path, lang_ext, glossary)
+                        if needs or self._needs_case_migration(existing_path, write_path, name_set):
                             targets.append(TranslationTarget(
                                 source_file=jar_path,
                                 path_in_jar=name,
@@ -97,7 +101,8 @@ class ModpackScanner:
                                 format="json_lang" if lang_ext == "json" else "legacy_lang",
                                 output_mode="jar_inject",
                                 output_lang_code=lang_code,
-                                target_path_in_jar=target_path,
+                                target_path_in_jar=write_path,
+                                existing_path_in_jar=existing_path,
                             ))
 
                     elif (
@@ -107,11 +112,13 @@ class ModpackScanner:
                         and name.endswith(".json")
                         and not name.endswith("/")
                     ):
-                        target_path = self._target_patchouli_path(parts, lang_code, name_set)
-                        if not target_path:
+                        write_path = self._canonical_patchouli_path(parts, lang_code)
+                        if not write_path:
                             continue
+                        existing_path = self._existing_patchouli_path(parts, lang_code, name_set)
                         mod_id = parts[1]
-                        if self._patchouli_needs_translation(zf, name, target_path, glossary):
+                        needs = self._patchouli_needs_translation(zf, name, existing_path, glossary)
+                        if needs or self._needs_case_migration(existing_path, write_path, name_set):
                             targets.append(TranslationTarget(
                                 source_file=jar_path,
                                 path_in_jar=name,
@@ -119,7 +126,8 @@ class ModpackScanner:
                                 format="patchouli_json",
                                 output_mode="jar_inject",
                                 output_lang_code=lang_code,
-                                target_path_in_jar=target_path,
+                                target_path_in_jar=write_path,
+                                existing_path_in_jar=existing_path,
                             ))
         except (zipfile.BadZipFile, OSError):
             pass
@@ -136,15 +144,29 @@ class ModpackScanner:
             return "lang"
         return None
 
-    def _target_lang_path(self, source_path: str, lang_code: str, names: set[str]) -> str:
+    def _canonical_lang_path(self, source_path: str, lang_code: str) -> str:
+        """寫入目標:一律正規小寫檔名。Minecraft 語言碼為小寫、jar 內查找
+        (ZipFile.getEntry) 區分大小寫,只有 zh_tw.json 會被遊戲載入。"""
         lang_dir, filename = source_path.rsplit("/", 1)
         ext = filename.rsplit(".", 1)[1]
-        candidates = self._lang_code_candidates(lang_code, ext)
-        for candidate in candidates:
+        return f"{lang_dir}/{lang_code.lower()}.{ext}"
+
+    def _existing_lang_path(self, source_path: str, lang_code: str, names: set[str]) -> str | None:
+        """既有譯檔(供 diff/重用)。優先小寫,其次大寫變體;皆無則 None。"""
+        lang_dir, filename = source_path.rsplit("/", 1)
+        ext = filename.rsplit(".", 1)[1]
+        for candidate in self._lang_code_candidates(lang_code, ext):
             path = f"{lang_dir}/{candidate}"
             if path in names:
                 return path
-        return f"{lang_dir}/{lang_code.lower()}.{ext}"
+        return None
+
+    def _needs_case_migration(
+        self, existing_path: str | None, write_path: str, names: set[str]
+    ) -> bool:
+        """既有譯檔在非正規(大寫)路徑,而正規小寫路徑尚不存在 → 需遷移。
+        即使無新內容待翻,也要把既有譯文複製到遊戲讀得到的小寫檔。"""
+        return existing_path is not None and existing_path != write_path and write_path not in names
 
     def _lang_code_candidates(self, lang_code: str, ext: str) -> list[str]:
         lower = lang_code.lower()
@@ -158,7 +180,7 @@ class ModpackScanner:
         self,
         zf: zipfile.ZipFile,
         source_path: str,
-        target_path: str,
+        existing_path: str | None,
         lang_ext: str,
         glossary=None,
     ) -> bool:
@@ -173,39 +195,37 @@ class ModpackScanner:
             return False
 
         existing: dict[str, str] = {}
-        if target_path in zf.namelist():
+        if existing_path and existing_path in zf.namelist():
             try:
-                target_raw = zf.read(target_path).decode("utf-8-sig")
+                target_raw = zf.read(existing_path).decode("utf-8-sig")
                 existing = parse_json_lang(target_raw) if lang_ext == "json" else parse_legacy_lang(target_raw)
             except (KeyError, UnicodeDecodeError, json.JSONDecodeError):
                 existing = {}
         return bool(diff_keys(source, existing, glossary=glossary))
 
-    def _target_patchouli_path(self, parts: list[str], lang_code: str, names: set[str]) -> str | None:
-        source_locale_idx = next(
-            (i for i, part in enumerate(parts) if part.lower() == "en_us"),
-            None,
-        )
-        if source_locale_idx is None:
+    def _canonical_patchouli_path(self, parts: list[str], lang_code: str) -> str | None:
+        """寫入目標:語系目錄一律正規小寫(en_us → zh_tw)。"""
+        idx = next((i for i, part in enumerate(parts) if part.lower() == "en_us"), None)
+        if idx is None:
             return None
+        target_parts = list(parts)
+        target_parts[idx] = lang_code.lower()
+        return "/".join(target_parts)
 
-        candidates = [lang_code.lower()]
-        if "_" in lang_code:
-            left, right = lang_code.lower().split("_", 1)
-            candidates.append(f"{left}_{right.upper()}")
-
-        for candidate in dict.fromkeys(candidates):
+    def _existing_patchouli_path(self, parts: list[str], lang_code: str, names: set[str]) -> str | None:
+        """既有譯頁(可能在大寫語系目錄),供 diff/重用;皆無則 None。"""
+        idx = next((i for i, part in enumerate(parts) if part.lower() == "en_us"), None)
+        if idx is None:
+            return None
+        for candidate in self._locale_candidates(lang_code):
             target_parts = list(parts)
-            target_parts[source_locale_idx] = candidate
+            target_parts[idx] = candidate
             target_path = "/".join(target_parts)
             if target_path in names:
                 return target_path
+        return None
 
-        target_parts = list(parts)
-        target_parts[source_locale_idx] = lang_code.lower()
-        return "/".join(target_parts)
-
-    def _patchouli_needs_translation(self, zf: zipfile.ZipFile, source_path: str, target_path: str, glossary=None) -> bool:
+    def _patchouli_needs_translation(self, zf: zipfile.ZipFile, source_path: str, existing_path: str | None, glossary=None) -> bool:
         if getattr(self, "_include_translated", False):
             return True
         try:
@@ -218,9 +238,9 @@ class ModpackScanner:
             return False
 
         existing: dict[str, str] = {}
-        if target_path in zf.namelist():
+        if existing_path and existing_path in zf.namelist():
             try:
-                target_page = json.loads(zf.read(target_path).decode("utf-8-sig"))
+                target_page = json.loads(zf.read(existing_path).decode("utf-8-sig"))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 target_page = {}
             existing = read_patchouli_text(target_page)
@@ -262,28 +282,49 @@ class ModpackScanner:
         cjk = sum(1 for value in sample if re.search(r"[\u3400-\u9fff]", value))
         return englishish >= max(1, len(sample) // 3) and cjk <= max(1, len(sample) // 4)
 
-    def _scan_file_has_pending_text(self, source_file: Path, target_file: Path, parser, glossary=None) -> bool:
+    def _scan_file_has_pending_text(self, source_file: Path, existing_file: Path | None, parser, glossary=None) -> bool:
         if getattr(self, "_include_translated", False):
             return True
         try:
             source = parser(source_file.read_text(encoding="utf-8"))
-            existing = parser(target_file.read_text(encoding="utf-8")) if target_file.exists() else {}
+            existing = (
+                parser(existing_file.read_text(encoding="utf-8"))
+                if existing_file and existing_file.exists()
+                else {}
+            )
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return False
         return bool(diff_keys(source, existing, glossary=glossary))
 
-    def _target_flat_locale_file(self, source_file: Path, lang_code: str) -> Path:
+    def _canonical_flat_locale_file(self, source_file: Path, lang_code: str) -> Path:
+        """寫入目標:一律正規小寫檔名。"""
+        return source_file.with_name(f"{lang_code.lower()}{source_file.suffix}")
+
+    def _existing_flat_locale_file(self, source_file: Path, lang_code: str) -> Path | None:
         for locale in self._locale_candidates(lang_code):
             candidate = source_file.with_name(f"{locale}{source_file.suffix}")
             if candidate.exists():
                 return candidate
-        return source_file.with_name(f"{lang_code.lower()}{source_file.suffix}")
+        return None
 
-    def _target_split_locale_file(self, lang_root: Path, source_file: Path, lang_code: str) -> Path:
-        relative = source_file.relative_to(lang_root)
-        parts = list(relative.parts)
-        parts[0] = self._existing_locale_dir_name(lang_root, lang_code)
+    def _canonical_split_locale_file(self, lang_root: Path, source_file: Path, lang_code: str) -> Path:
+        """寫入目標:語系目錄一律正規小寫。"""
+        parts = list(source_file.relative_to(lang_root).parts)
+        parts[0] = lang_code.lower()
         return lang_root.joinpath(*parts)
+
+    def _existing_split_locale_file(self, lang_root: Path, source_file: Path, lang_code: str) -> Path | None:
+        parts = list(source_file.relative_to(lang_root).parts)
+        for locale in self._locale_candidates(lang_code):
+            candidate = lang_root.joinpath(locale, *parts[1:])
+            if candidate.exists():
+                return candidate
+        return None
+
+    def _needs_local_migration(self, existing_file: Path | None, write_file: Path) -> bool:
+        """既有譯檔在非正規(大寫)路徑,而正規小寫路徑尚不存在 → 需遷移。
+        (Windows 檔名不分大小寫時 write_file.exists() 會命中大寫檔,自動不遷移。)"""
+        return existing_file is not None and existing_file != write_file and not write_file.exists()
 
     def _locale_candidates(self, lang_code: str) -> list[str]:
         lower = lang_code.lower()
@@ -292,12 +333,6 @@ class ModpackScanner:
             left, right = lower.split("_", 1)
             candidates.append(f"{left}_{right.upper()}")
         return list(dict.fromkeys(candidates))
-
-    def _existing_locale_dir_name(self, lang_root: Path, lang_code: str) -> str:
-        for locale in self._locale_candidates(lang_code):
-            if (lang_root / locale).is_dir():
-                return locale
-        return lang_code.lower()
 
     def _scan_snbt_lang_tree(self, lang_root: Path, mod_id: str, fmt: str, lang_code: str, glossary=None) -> list[TranslationTarget]:
         if not lang_root.is_dir():
@@ -312,16 +347,19 @@ class ModpackScanner:
             parts = relative.parts
             if len(parts) == 1:
                 locale_name = lang_file.stem
-                target_file = self._target_flat_locale_file(lang_file, lang_code)
+                existing_file = self._existing_flat_locale_file(lang_file, lang_code)
+                write_file = self._canonical_flat_locale_file(lang_file, lang_code)
             else:
                 locale_name = parts[0]
-                target_file = self._target_split_locale_file(lang_root, lang_file, lang_code)
+                existing_file = self._existing_split_locale_file(lang_root, lang_file, lang_code)
+                write_file = self._canonical_split_locale_file(lang_root, lang_file, lang_code)
 
             if not self._is_source_locale_name(locale_name, lang_code):
                 if self._is_locale_like_name(locale_name) or not self._looks_english_like_file(lang_file, parse_snbt_lang):
                     continue
 
-            if not self._scan_file_has_pending_text(lang_file, target_file, parse_snbt_lang, glossary):
+            needs = self._scan_file_has_pending_text(lang_file, existing_file, parse_snbt_lang, glossary)
+            if not (needs or self._needs_local_migration(existing_file, write_file)):
                 continue
 
             targets.append(TranslationTarget(
@@ -331,7 +369,8 @@ class ModpackScanner:
                 format=fmt,
                 output_mode="in_place",
                 output_lang_code=lang_code,
-                target_file=target_file,
+                target_file=write_file,
+                existing_file=existing_file,
             ))
         return targets
 
@@ -348,8 +387,10 @@ class ModpackScanner:
                 if self._is_locale_like_name(locale_name) or not self._looks_english_like_file(lang_file, parser):
                     continue
 
-            target_file = self._target_flat_locale_file(lang_file, lang_code)
-            if not self._scan_file_has_pending_text(lang_file, target_file, parser, glossary):
+            existing_file = self._existing_flat_locale_file(lang_file, lang_code)
+            write_file = self._canonical_flat_locale_file(lang_file, lang_code)
+            needs = self._scan_file_has_pending_text(lang_file, existing_file, parser, glossary)
+            if not (needs or self._needs_local_migration(existing_file, write_file)):
                 continue
             targets.append(TranslationTarget(
                 source_file=lang_file,
@@ -358,7 +399,8 @@ class ModpackScanner:
                 format=fmt,
                 output_mode="in_place",
                 output_lang_code=lang_code,
-                target_file=target_file,
+                target_file=write_file,
+                existing_file=existing_file,
             ))
         return targets
 
