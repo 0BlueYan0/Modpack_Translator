@@ -152,7 +152,9 @@ def test_link_target_preserved_when_link_text_translated():
     got = extract_mdx(REAL)
     k = next(key for key, v in got.items() if v.startswith("Charge the chainsaw"))
     out = rebuild_mdx(REAL, {k: "在[充電器](@oritech:charger_block)中充電。"})
-    assert "(@oritech:charger_block)" in out
+    assert "(@oritech:charger_block)" in out          # link target preserved
+    assert "在[充電器]" in out                          # translation actually applied
+    assert "Charge the chainsaw" not in out            # source span was replaced (a no-op rebuild would leave this → fails)
 
 def test_all_extracted_values_are_nonempty_prose():
     for v in extract_mdx(REAL).values():
