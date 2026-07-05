@@ -28,6 +28,7 @@ from modpack_translator.pipeline.preprocessor import (
     decode,
     diff_keys,
     encode,
+    jar_member_exists,
     read_inline_snbt_text,
     is_usable_translation,
     read_legacy_lang,
@@ -420,29 +421,43 @@ def read_target_strings(target: TranslationTarget) -> dict[str, str]:
 
 
 def read_existing_target(target: TranslationTarget, lang_code: str) -> dict[str, str]:
+    """讀既有譯文供 diff/重用。既有檔可能在非正規(大寫)路徑,故一律讀
+    existing_* 而非寫入用的 target_*(正規小寫,可能尚不存在)。"""
     if target.output_mode == "jar_inject":
+        existing_path = target.existing_path_in_jar
+        if not existing_path:
+            return {}
         if target.format == "json_lang":
-            return read_jar_json_lang(target.source_file, target.target_path_in_jar)
+            return read_jar_json_lang(target.source_file, existing_path)
         if target.format == "legacy_lang":
-            return read_jar_legacy_lang(target.source_file, target.target_path_in_jar)
+            return read_jar_legacy_lang(target.source_file, existing_path)
         if target.format == "patchouli_json":
-            page = read_jar_json_file(target.source_file, target.target_path_in_jar)
+            page = read_jar_json_file(target.source_file, existing_path)
             return read_patchouli_text(page)
         return {}
 
+    existing_file = target.existing_file
     if target.format in ("ftbq_snbt", "heracles_snbt"):
-        path = target.target_file or target.source_file.parent / f"{lang_code}.snbt"
-        return read_existing_snbt(path)
+        return read_existing_snbt(existing_file) if existing_file else {}
     elif target.format in ("ftbq_inline_snbt", "heracles_inline_snbt"):
         return {}
     elif target.format == "bq_lang":
-        path = target.target_file or target.source_file.parent / f"{lang_code}.lang"
-        return read_existing_bq_lang(path)
+        return read_existing_bq_lang(existing_file) if existing_file else {}
     else:
-        path = target.target_file or target.source_file.parent / f"{lang_code}.json"
-        if path.exists():
-            return json.loads(path.read_text(encoding="utf-8"))
+        if existing_file and existing_file.exists():
+            return json.loads(existing_file.read_text(encoding="utf-8"))
     return {}
+
+
+def _output_exists(target: TranslationTarget) -> bool:
+    """正規小寫寫入目標是否已存在。"""
+    if target.output_mode == "jar_inject":
+        return bool(target.target_path_in_jar) and jar_member_exists(
+            target.source_file, target.target_path_in_jar
+        )
+    if target.target_file is not None:
+        return target.target_file.exists()
+    return True
 
 
 def process_target(
@@ -481,24 +496,31 @@ def process_target(
         en_dict, zh_existing, translator, cache, retry_count, cancel_check, on_pair_done
     )
 
-    if result:
+    # 寫入 payload 以既有譯文打底：遷移到正規小寫檔時所有既有 key 一併帶過去
+    # （只寫 result 會讓新小寫檔僅含本輪 diff,其餘 fallback 成英文）。
+    # inline 格式就地改寫來源檔,zh_existing 為空,payload 即 result。
+    write_payload = {**zh_existing, **result}
+    # result 為空但既有譯文在非正規(大寫)檔、正規小寫檔尚不存在 → 純遷移,仍要建立小寫檔。
+    should_write = bool(result) or (bool(zh_existing) and not _output_exists(target))
+
+    if should_write:
         if target.output_mode == "jar_inject":
             if not target.target_path_in_jar:
                 raise ValueError(f"Missing jar target path for {target.source_file}")
             if target.format == "json_lang":
-                write_jar_json_lang(target.source_file, target.target_path_in_jar, result)
+                write_jar_json_lang(target.source_file, target.target_path_in_jar, write_payload)
             elif target.format == "legacy_lang":
-                write_jar_legacy_lang(target.source_file, target.target_path_in_jar, result)
+                write_jar_legacy_lang(target.source_file, target.target_path_in_jar, write_payload)
             else:
                 raise ValueError(f"Unsupported jar injection format: {target.format}")
         elif target.format in ("ftbq_snbt", "heracles_snbt"):
-            write_inplace_snbt(target.source_file, lang_code, result, target.target_file)
+            write_inplace_snbt(target.source_file, lang_code, write_payload, target.target_file)
         elif target.format in ("ftbq_inline_snbt", "heracles_inline_snbt"):
             write_inline_snbt(target.source_file, result)
         elif target.format == "bq_lang":
-            write_inplace_bq_lang(target.source_file, lang_code, result, target.target_file)
+            write_inplace_bq_lang(target.source_file, lang_code, write_payload, target.target_file)
         else:
-            write_inplace_json(target.source_file, lang_code, result, target.target_file)
+            write_inplace_json(target.source_file, lang_code, write_payload, target.target_file)
 
     return n_translated, n_cached, n_fallback, failed
 
@@ -520,7 +542,12 @@ def _process_patchouli(
     target_path = target.target_path_in_jar or target.path_in_jar
     if not target_path:
         raise ValueError(f"Missing Patchouli target path for {target.source_file}")
-    existing_page = read_jar_json_file(target.source_file, target_path) if target.output_mode == "jar_inject" else {}
+    # 既有譯頁可能在大寫語系目錄;讀 existing_path 供重用/diff,寫入一律正規小寫 target_path。
+    existing_page = (
+        read_jar_json_file(target.source_file, target.existing_path_in_jar)
+        if target.output_mode == "jar_inject"
+        else {}
+    )
     page = deepcopy(source_page)
     source_strings = read_patchouli_text(source_page)
     existing_strings = read_patchouli_text(existing_page) if existing_page else {}
@@ -577,7 +604,9 @@ def _process_patchouli(
         if on_pair_done is not None:
             on_pair_done(1)
 
-    if changed:
+    # 純遷移:既有譯頁在大寫目錄、正規小寫目錄尚不存在時,即使 page 未變也要建立小寫檔。
+    target_missing = target.output_mode == "jar_inject" and not jar_member_exists(target.source_file, target_path)
+    if changed or (target_missing and bool(existing_page)):
         if target.output_mode != "jar_inject":
             raise ValueError("Patchouli resource pack output is no longer supported")
         write_jar_json_file(target.source_file, target_path, page)
