@@ -22,7 +22,7 @@ class TranslationTarget:
     source_file: Path
     path_in_jar: str | None
     mod_id: str
-    format: str       # json_lang | legacy_lang | patchouli_json | ftbq_snbt | ftbq_inline_snbt | heracles_snbt | heracles_inline_snbt | bq_lang | kubejs_json
+    format: str       # json_lang | legacy_lang | patchouli_json | ftbq_snbt | ftbq_inline_snbt | heracles_snbt | heracles_inline_snbt | bq_lang | kubejs_json | oracle_mdx
     output_mode: str  # jar_inject | in_place
     output_lang_code: str = "zh_tw"
     target_path_in_jar: str | None = None      # 寫入目標:一律正規小寫（遊戲讀得到）
@@ -255,11 +255,12 @@ class ModpackScanner:
     # ------------------------------------------------------------ Oracle wiki
 
     def _scan_oracle_book(self, zf, jar_path, name, parts, name_set, lang_code, glossary) -> TranslationTarget | None:
-        # 路徑：assets/oracle_index/books/<book>/<root>/...；root∈{content,docs}；不在 translated 下
+        # 路徑：assets/oracle_index/books/<book>/<root>/...；root∈{content,docs}。
+        # 輸出/既有譯樹是 .../books/<book>/translated/<locale>/<root>/... —
+        # 其 parts[4]=="translated" 已被下方 root 判定排除，故不需再全域搜尋 "translated"
+        # （全域搜尋會誤殺 book id 或子資料夾剛好叫 translated 的合法內容）。
         if not (len(parts) >= 6 and parts[0] == "assets" and parts[1] == "oracle_index"
                 and parts[2] == "books" and parts[4] in ("content", "docs")):
-            return None
-        if "translated" in parts:
             return None
         book = parts[3]
         root_idx = 4
