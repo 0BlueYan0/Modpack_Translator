@@ -87,3 +87,39 @@ def test_body_stops_at_any_angle_bracket_line():
 
 def test_body_angle_bracket_rebuild_exact_when_no_translation():
     assert rebuild_mdx(JSX_BODY, {}) == JSX_BODY
+
+JSX = (
+    "---\r\ntitle: X\r\ntype: item\r\nid: m:x\r\n---\r\n"
+    "\r\n"
+    "<Callout variant=\"info\">\r\n"
+    "    The forests will fall.\r\n"
+    "</Callout>\r\n"
+    "\r\n"
+    "<center>\r\n"
+    "<ModAsset location=\"oritech:area/x\" width={512} />\r\n"
+    "</center>\r\n"
+    "\r\n"
+    "<CraftingRecipe\r\n"
+    "    slots={[\r\n"
+    "        '', 'oritech:steel_ingot', '',\r\n"
+    "    ]}\r\n"
+    "/>\r\n"
+)
+
+def test_callout_inner_text_is_translatable():
+    assert "The forests will fall." in extract_mdx(JSX).values()
+
+def test_jsx_structure_preserved_and_only_callout_translated():
+    got = extract_mdx(JSX)
+    # ModAsset/CraftingRecipe/center/slots 內容不可被抽成可翻
+    assert not any("ModAsset" in v or "slots" in v or "steel_ingot" in v for v in got.values())
+    ck = next(k for k, v in got.items() if v == "The forests will fall.")
+    out = rebuild_mdx(JSX, {ck: "森林將傾倒。"})
+    assert "<Callout variant=\"info\">\r\n" in out          # 開標籤保留
+    assert "</Callout>\r\n" in out                          # 閉標籤保留
+    assert "    森林將傾倒。\r\n" in out                     # 內文翻譯、縮排保留
+    assert "<ModAsset location=\"oritech:area/x\" width={512} />\r\n" in out
+    assert "        '', 'oritech:steel_ingot', '',\r\n" in out  # CraftingRecipe 多行整段保留
+
+def test_jsx_rebuild_exact_when_no_translation():
+    assert rebuild_mdx(JSX, {}) == JSX

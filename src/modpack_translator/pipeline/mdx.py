@@ -93,6 +93,28 @@ def _push_paragraph(out: list, ctr: list[int], lines: list[str]) -> None:
         _push_text(out, ctr, "".join(lines))
 
 
+_PAIRED_JSX = {"center"}  # Callout 另行處理；其餘 4 種內僅這個是成對且無散文
+
+
+def _jsx_block_end(lines: list[str], i: int) -> int:
+    tag = re.match(r"^[ \t]*<([A-Za-z][A-Za-z0-9]*)", lines[i]).group(1)
+    if tag in _PAIRED_JSX:
+        close = f"</{tag}>"
+        j = i
+        while j < len(lines):
+            if close in lines[j]:
+                return j + 1
+            j += 1
+        return len(lines)
+    # 自閉合（可能跨多行）：直到出現 '/>'
+    j = i
+    while j < len(lines):
+        if "/>" in lines[j]:
+            return j + 1
+        j += 1
+    return len(lines)
+
+
 def _body_segments(body: str, out: list, ctr: list[int]) -> None:
     lines = body.splitlines(keepends=True)
     i = 0
@@ -101,7 +123,22 @@ def _body_segments(body: str, out: list, ctr: list[int]) -> None:
         if not line.strip():
             out.append((None, line)); i += 1; continue
         if _JSX_LINE_RE.match(line):
-            out.append((None, line)); i += 1; continue   # 本任務：< 開頭行(JSX/閉標籤/註解)先原樣保留（Task 3 細分）
+            if re.match(r"^[ \t]*<Callout\b", line):
+                out.append((None, line)); i += 1
+                inner: list[str] = []
+                while i < len(lines) and not re.match(r"^[ \t]*</Callout>", lines[i]):
+                    inner.append(lines[i]); i += 1
+                _push_paragraph(out, ctr, inner)
+                if i < len(lines):
+                    out.append((None, lines[i])); i += 1
+                continue
+            if _JSX_OPEN_RE.match(line):
+                j = _jsx_block_end(lines, i)
+                for k in range(i, j):
+                    out.append((None, lines[k]))
+                i = j
+                continue
+            out.append((None, line)); i += 1; continue   # 散雜 < 行（如孤立閉標籤/註解）原樣保留
         mh = _HEADING_RE.match(line)
         if mh:
             out.append((None, mh.group(1))); _push_text(out, ctr, mh.group(2)); i += 1; continue
