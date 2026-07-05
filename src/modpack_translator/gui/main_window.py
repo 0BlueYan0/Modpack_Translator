@@ -77,6 +77,8 @@ _FMT_NAME_MAP: dict[str, str] = {
     "heracles_inline_snbt": "Heracles inline SNBT",
     "bq_lang":              "Better Questing lang",
     "kubejs_json":          "KubeJS JSON",
+    "oracle_mdx":           "Oracle 指南內文 (MDX)",
+    "oracle_meta":          "Oracle 指南目錄",
 }
 
 
