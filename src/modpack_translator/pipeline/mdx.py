@@ -85,6 +85,7 @@ def _frontmatter_segments(fm: str, out: list, ctr: list[int]) -> None:
 _HEADING_RE = re.compile(r"^([ \t]*#{1,6}[ \t]+)(.*)$", re.S)
 _LIST_RE = re.compile(r"^([ \t]*(?:[-*+]|\d+\.)[ \t]+)(.*)$", re.S)
 _JSX_OPEN_RE = re.compile(r"^[ \t]*<[A-Za-z][A-Za-z0-9]*")
+_JSX_LINE_RE = re.compile(r"^[ \t]*<")
 
 
 def _push_paragraph(out: list, ctr: list[int], lines: list[str]) -> None:
@@ -99,8 +100,8 @@ def _body_segments(body: str, out: list, ctr: list[int]) -> None:
         line = lines[i]
         if not line.strip():
             out.append((None, line)); i += 1; continue
-        if _JSX_OPEN_RE.match(line):
-            out.append((None, line)); i += 1; continue   # 本任務：JSX 行先原樣保留（Task 3 細分）
+        if _JSX_LINE_RE.match(line):
+            out.append((None, line)); i += 1; continue   # 本任務：< 開頭行(JSX/閉標籤/註解)先原樣保留（Task 3 細分）
         mh = _HEADING_RE.match(line)
         if mh:
             out.append((None, mh.group(1))); _push_text(out, ctr, mh.group(2)); i += 1; continue
@@ -110,7 +111,7 @@ def _body_segments(body: str, out: list, ctr: list[int]) -> None:
         para: list[str] = []
         while i < len(lines):
             l = lines[i]
-            if (not l.strip()) or _JSX_OPEN_RE.match(l) or _HEADING_RE.match(l) or _LIST_RE.match(l):
+            if (not l.strip()) or _JSX_LINE_RE.match(l) or _HEADING_RE.match(l) or _LIST_RE.match(l):
                 break
             para.append(l); i += 1
         _push_paragraph(out, ctr, para)

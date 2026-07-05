@@ -63,3 +63,27 @@ def test_body_markers_preserved_on_rebuild():
 
 def test_body_rebuild_exact_when_no_translation():
     assert rebuild_mdx(BODY, {}) == BODY
+
+JSX_BODY = (
+    "Some paragraph text.\r\n"
+    "<Callout>\r\n"
+    "Nested text.\r\n"
+    "</Callout>\r\n"
+    "More text.\r\n"
+)
+
+def test_body_stops_at_any_angle_bracket_line():
+    vals = list(extract_mdx(JSX_BODY).values())
+    # 閉標籤不得被吸入任何可翻段落
+    assert all("</Callout>" not in v for v in vals)
+    # < 開頭行(開/閉標籤)本身不可成為可翻段落
+    assert "<Callout>" not in vals
+    # Callout 前後兩段是各自獨立的可翻片段
+    assert "Some paragraph text." in vals
+    assert "Nested text." in vals
+    assert "More text." in vals
+    # 兩段散文不得被黏成一段
+    assert not any(("Nested text." in v and "More text." in v) for v in vals)
+
+def test_body_angle_bracket_rebuild_exact_when_no_translation():
+    assert rebuild_mdx(JSX_BODY, {}) == JSX_BODY
