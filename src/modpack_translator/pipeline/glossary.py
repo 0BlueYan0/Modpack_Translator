@@ -36,13 +36,21 @@ _EXACT_WS_RE = re.compile(r"^(\s*)(.*?)(\s*)$", re.DOTALL)
 class Glossary:
     """英→繁對照表與比對器。terms 的 key 為官方英文詞、value 為官方繁中譯名。"""
 
-    def __init__(self, terms: dict[str, str]) -> None:
+    def __init__(
+        self, terms: dict[str, str], custom_keys: Iterable[str] | None = None
+    ) -> None:
         self.terms = dict(terms)
+        # 使用者自訂用語庫的詞條 key（大小寫敏感）。只有這些單字詞會啟用「句中
+        # 替換」；官方詞庫的單字詞維持保守（僅整串相等時替換），避免 create 等
+        # 英文常用字被誤傷。使用者自行加入的專有名詞（模組名、素材名）才強制。
+        self._custom_keys = {k for k in (custom_keys or ()) if k in self.terms}
         self._zh_by_lower = {en.lower(): zh for en, zh in self.terms.items()}
         self._canon_by_lower = {en.lower(): en for en in self.terms}
         self._pattern: re.Pattern[str] | None = None
         self._enforce_pattern: re.Pattern[str] | None = None
         self._enforce_ready = False
+        self._enforce_custom_pattern: re.Pattern[str] | None = None
+        self._enforce_custom_ready = False
 
     def _compiled(self) -> re.Pattern[str]:
         if self._pattern is None:
@@ -114,6 +122,35 @@ class Glossary:
             self._enforce_ready = True
         return self._enforce_pattern
 
+    def _enforce_custom_compiled(self) -> "re.Pattern[str] | None":
+        """自訂用語庫「單字詞」的句中替換 pattern（不分大小寫）。無則 None。
+
+        官方詞庫的單字詞不納入（維持保守），只有使用者自訂的專有名詞才句中
+        替換。以不分大小寫比對，涵蓋散文中的 Allthemodium／AllTheModium 等
+        混寫；全小寫的表面字（如圖片路徑 atm:textures/allthemodium/…）由
+        enforce() 的替換函式跳過，避免破壞資源位置。詞前邊界除了「非英數」也
+        接受色碼（&5、§a）——任務標題常見「&5Unobtainium」色碼緊貼詞。詞後
+        若接中文，連同中間單一半形空白一併吃掉：「Unobtainium 工具」→「難得
+        素工具」。
+        """
+        if not self._enforce_custom_ready:
+            singles = sorted(
+                (t for t in self._custom_keys if " " not in t.strip()),
+                key=len,
+                reverse=True,
+            )
+            if singles:
+                alternation = "|".join(re.escape(term) for term in singles)
+                self._enforce_custom_pattern = re.compile(
+                    r"(?:(?<![A-Za-z0-9])|(?<=[&§][0-9A-Za-z])|(?<=&#[0-9A-Fa-f]{6}))"
+                    r"(?:(?<=[㐀-鿿]) )?"
+                    r"(" + alternation + r")(?:e?s)?"
+                    r"(?![A-Za-z0-9])(?: (?=[㐀-鿿]))?",
+                    re.IGNORECASE,
+                )
+            self._enforce_custom_ready = True
+        return self._enforce_custom_pattern
+
     def enforce(self, text: str) -> str:
         """把譯文中殘留的英文詞彙替換為譯名（事後保證）。
 
@@ -132,17 +169,30 @@ class Glossary:
         zh_exact = self.terms.get(m.group(2))
         if zh_exact is not None:
             return f"{m.group(1)}{zh_exact}{m.group(3)}"
-        pattern = self._enforce_compiled()
-        if pattern is None:
-            return text
-
         def _sub(match: re.Match[str]) -> str:
             zh = self.terms.get(match.group(1))
-            if zh is None or zh in text:
+            if zh is None or zh in result:
                 return match.group(0)
             return zh
 
-        return pattern.sub(_sub, text)
+        def _sub_custom(match: re.Match[str]) -> str:
+            surface = match.group(1)
+            # 全小寫表面字視為資源位置/識別字（atm:.../allthemodium/…），不動
+            if surface.islower():
+                return match.group(0)
+            zh = self._zh_by_lower.get(surface.lower())
+            if zh is None or zh in result:
+                return match.group(0)
+            return zh
+
+        result = text
+        pattern = self._enforce_compiled()
+        if pattern is not None:
+            result = pattern.sub(_sub, result)
+        custom = self._enforce_custom_compiled()
+        if custom is not None:
+            result = custom.sub(_sub_custom, result)
+        return result
 
     def format_block(self, pairs: list[tuple[str, str]], cap: int = _SINGLE_TERM_CAP) -> str:
         """把命中的詞彙渲染成附加在 system prompt 尾端的 [Glossary] 區塊。"""
@@ -267,18 +317,22 @@ def load_merged_glossary(
         layer = load_glossary(p)
         if layer is not None:
             terms.update(layer.terms)
+    custom_keys: set[str] = set()
     for en, zh in load_custom_terms(custom_path).items():
         existing = [k for k in terms if k.lower() == en.lower()]
         if zh:
             if existing:
                 for k in existing:
                     terms[k] = zh
+                    custom_keys.add(k)
             else:
                 terms[en] = zh
+                custom_keys.add(en)
         else:
             for k in existing:
                 del terms[k]
-    return Glossary(terms) if terms else None
+                custom_keys.discard(k)
+    return Glossary(terms, custom_keys=custom_keys) if terms else None
 
 
 def modnames_glossary_path(lang_code: str) -> Path:

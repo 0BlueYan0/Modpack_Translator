@@ -594,9 +594,15 @@ def _looks_like_credit(text: str) -> bool:
     if " - " not in text:
         return False
     left, _, right = text.partition(" - ")
-    if not left.strip() or not right.strip():
+    left, right = left.strip(), right.strip()
+    if not left or not right:
         return False
-    return bool(re.fullmatch(r"[A-Z][A-Za-z0-9' ._-]+", left.strip()))
+    if not re.fullmatch(r"[A-Z][A-Za-z0-9' ._-]+", left):
+        return False
+    # 真正的「作者 - 標題」署名左半是短名稱（Direwolf20、AllTheMods）。破折號
+    # 敘事句左半是整個子句（"Team Rocket's masterwork sits in the heart of the
+    # volcano"），字數多，不算署名——否則整段描述會被誤判不可譯而跳過。
+    return len(re.findall(r"\S+", left)) <= 4
 
 
 def _looks_like_config_title(text: str) -> bool:
@@ -620,7 +626,13 @@ def _looks_like_code_or_table_line(text: str) -> bool:
         return True
     if re.search(r"[;{}]$", plain) and re.search(r"\b(?:%s)\b" % "|".join(_CODE_WORDS), plain, re.IGNORECASE):
         return True
-    if re.search(r"\b(?:%s)\b" % "|".join(_CODE_WORDS), plain, re.IGNORECASE) and re.search(r"[=();{}]", plain):
+    # 型別關鍵字後緊接識別字與程式標點才算宣告式程式碼（long x = …、void foo(…、
+    # int n = 0）。一般散文只是句中含 long/void/return/class/string 等字，加上任意
+    # 括號（"a long list (or can)"）不該被誤判為程式碼而整段跳過不翻。
+    code_words = "|".join(_CODE_WORDS)
+    if re.search(r"\b(?:%s)\b\s+[A-Za-z_]\w*\s*=\s*\S" % code_words, plain, re.IGNORECASE):
+        return True
+    if re.search(r"\b(?:%s)\b\s+[A-Za-z_]\w*\(" % code_words, plain, re.IGNORECASE):
         return True
     return False
 

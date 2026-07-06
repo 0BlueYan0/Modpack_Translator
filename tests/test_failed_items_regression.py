@@ -198,3 +198,69 @@ def test_ordinary_colored_sentence_still_translates():
 def test_ordinary_item_names_still_translate():
     assert classify_translation_entry("block.minecraft.stone", "Stone") == "translate"
     assert classify_translation_entry("item.create.wrench", "Wrench") == "translate"
+
+
+# ── 5. 散文誤判為程式碼/署名的回歸（v1.7.x：pokenav 等整段被跳過） ────
+# 根因：_looks_like_code_or_table_line 只要文中含 _CODE_WORDS 任一字
+# （long/void/return/class/string/int…）且出現任一 = ( ) ; { } 就判為程式
+# 碼；_looks_like_credit 只要有 " - " 且左半是普通英文字就判為署名。任務
+# 描述括號與破折號極常見，導致整段英文被分類 skip、原樣寫回從未送翻。
+
+def test_prose_with_code_word_and_parens_still_translates():
+    # catch_em_all pokenav：「a long list」+「(or can)」→ 舊版誤判程式碼
+    assert classify_translation_entry(
+        "quest.410492282A446A06.quest_desc[0]",
+        "The &aPokeNav&r is a tool to help understand what &cPokemon&r will (or can) "
+        "Spawn near you. \\n\\nOpening up the &aPokeNav&r and you'll get a long list of "
+        "&cPokemon&r!",
+    ) == "translate"
+
+
+def test_prose_with_void_keyword_still_translates():
+    # allthemodium 系列：ATM 內容滿是 "Void"
+    assert classify_translation_entry(
+        "quest.3621155A4138EBCA.quest_desc[0]",
+        "The Void Cell needs to be partitioned (filtered) in a Cell Workbench before use.",
+    ) == "translate"
+
+
+def test_prose_with_return_keyword_still_translates():
+    assert classify_translation_entry(
+        "quest.4CE571F942461909.quest_desc[2]",
+        "The Artisanal Ritual Satchel functions nearly identically to the regular one, "
+        "and you get it back in return (mostly).",
+    ) == "translate"
+
+
+def test_narrative_with_dash_not_treated_as_credit():
+    # legendaries：破折號敘事句左半是整句子句，非「作者 - 標題」署名
+    assert classify_translation_entry(
+        "quest.1E6F000000001004.quest_desc[0]",
+        "Team Rocket's masterwork sits in the heart of the volcano - a 300 million year "
+        "old fossil Pokemon rebuilt as a living weapon.",
+    ) == "translate"
+
+
+def test_tier_dash_prose_still_translates():
+    # mysticalagriculture：「This is the Tier 5 - Awakened Essence...」
+    assert classify_translation_entry(
+        "quest.7A103577EAE7B3F1.quest_desc[0]",
+        "This is the Tier 5 - Awakened Essence, made by combining 4 Cognizant Dust, "
+        "10 of each Elemental Essence and 1 Supremium Block together.",
+    ) == "translate"
+
+
+# 修正後：真正的程式碼與署名仍必須被跳過（不得因放寬而誤放行）
+def test_genuine_java_code_line_still_skipped():
+    assert classify_translation_entry(
+        "some.mod.snippet", "public void doThing() { return; }"
+    ) != "translate"
+    assert classify_translation_entry("some.mod.snippet", "int count = 0;") != "translate"
+    assert classify_translation_entry("some.mod.snippet", "boolean flag = true;") != "translate"
+
+
+def test_genuine_author_credit_still_skipped():
+    # 「作者 - 標題」短署名（左半 ≤4 字）仍視為不可譯
+    assert classify_translation_entry(
+        "quest.0000000000000009.quest_desc[0]", "Direwolf20 - Modpack Author"
+    ) != "translate"
