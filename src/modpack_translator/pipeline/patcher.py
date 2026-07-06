@@ -190,6 +190,10 @@ def write_jar_json_file(jar_path: Path, path_in_jar: str, payload: dict[str, Any
     _rewrite_jar(jar_path, {path_in_jar: raw})
 
 
+def write_jar_text(jar_path: Path, path_in_jar: str, text: str) -> None:
+    _rewrite_jar(jar_path, {path_in_jar: text.encode("utf-8")})
+
+
 def _rewrite_jar(jar_path: Path, replacements: dict[str, bytes]) -> None:
     tmp_path = jar_path.with_name(f"{jar_path.name}.tmp")
     try:

@@ -6,6 +6,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from modpack_translator.pipeline import mdx
 from modpack_translator.pipeline.preprocessor import (
     diff_keys,
     parse_json_lang,
@@ -21,7 +22,7 @@ class TranslationTarget:
     source_file: Path
     path_in_jar: str | None
     mod_id: str
-    format: str       # json_lang | legacy_lang | patchouli_json | ftbq_snbt | ftbq_inline_snbt | heracles_snbt | heracles_inline_snbt | bq_lang | kubejs_json
+    format: str       # json_lang | legacy_lang | patchouli_json | ftbq_snbt | ftbq_inline_snbt | heracles_snbt | heracles_inline_snbt | bq_lang | kubejs_json | oracle_mdx | oracle_meta
     output_mode: str  # jar_inject | in_place
     output_lang_code: str = "zh_tw"
     target_path_in_jar: str | None = None      # 寫入目標:一律正規小寫（遊戲讀得到）
@@ -129,6 +130,11 @@ class ModpackScanner:
                                 target_path_in_jar=write_path,
                                 existing_path_in_jar=existing_path,
                             ))
+
+                    else:
+                        target = self._scan_oracle_book(zf, jar_path, name, parts, name_set, lang_code, glossary)
+                        if target is not None:
+                            targets.append(target)
         except (zipfile.BadZipFile, OSError):
             pass
         return targets
@@ -244,6 +250,75 @@ class ModpackScanner:
             except (json.JSONDecodeError, UnicodeDecodeError):
                 target_page = {}
             existing = read_patchouli_text(target_page)
+        return bool(diff_keys(source, existing, glossary=glossary))
+
+    # ------------------------------------------------------------ Oracle wiki
+
+    def _scan_oracle_book(self, zf, jar_path, name, parts, name_set, lang_code, glossary) -> TranslationTarget | None:
+        # 路徑：assets/oracle_index/books/<book>/<root>/...；root∈{content,docs}。
+        # 輸出/既有譯樹是 .../books/<book>/translated/<locale>/<root>/... —
+        # 其 parts[4]=="translated" 已被下方 root 判定排除，故不需再全域搜尋 "translated"
+        # （全域搜尋會誤殺 book id 或子資料夾剛好叫 translated 的合法內容）。
+        if not (len(parts) >= 6 and parts[0] == "assets" and parts[1] == "oracle_index"
+                and parts[2] == "books" and parts[4] in ("content", "docs")):
+            return None
+        book = parts[3]
+        root_idx = 4
+        write = "/".join(parts[:root_idx] + ["translated", lang_code.lower()] + parts[root_idx:])
+        existing = write if write in name_set else None
+
+        if name.endswith(".mdx"):
+            if not self._oracle_mdx_needs_translation(zf, name, existing, glossary):
+                return None
+            return TranslationTarget(
+                source_file=jar_path, path_in_jar=name, mod_id=book,
+                format="oracle_mdx", output_mode="jar_inject",
+                output_lang_code=lang_code,
+                target_path_in_jar=write, existing_path_in_jar=existing,
+            )
+        if parts[-1] == "_meta.json":
+            if not self._oracle_meta_needs_translation(zf, name, existing, glossary):
+                return None
+            return TranslationTarget(
+                source_file=jar_path, path_in_jar=name, mod_id=book,
+                format="oracle_meta", output_mode="jar_inject",
+                output_lang_code=lang_code,
+                target_path_in_jar=write, existing_path_in_jar=existing,
+            )
+        return None
+
+    def _oracle_mdx_needs_translation(self, zf, source_path, existing_path, glossary) -> bool:
+        if getattr(self, "_include_translated", False):
+            return True
+        try:
+            source = mdx.extract_mdx(zf.read(source_path).decode("utf-8-sig"))
+        except (KeyError, UnicodeDecodeError):
+            return False
+        if not source:
+            return False
+        existing = {}
+        if existing_path and existing_path in zf.namelist():
+            try:
+                existing = mdx.extract_mdx(zf.read(existing_path).decode("utf-8-sig"))
+            except (KeyError, UnicodeDecodeError):
+                existing = {}
+        return bool(diff_keys(source, existing, glossary=glossary))
+
+    def _oracle_meta_needs_translation(self, zf, source_path, existing_path, glossary) -> bool:
+        if getattr(self, "_include_translated", False):
+            return True
+        try:
+            source = mdx.extract_meta(zf.read(source_path).decode("utf-8-sig"))
+        except (KeyError, UnicodeDecodeError):
+            return False
+        if not source:
+            return False
+        existing = {}
+        if existing_path and existing_path in zf.namelist():
+            try:
+                existing = mdx.extract_meta(zf.read(existing_path).decode("utf-8-sig"))
+            except (KeyError, UnicodeDecodeError):
+                existing = {}
         return bool(diff_keys(source, existing, glossary=glossary))
 
     # ---------------------------------------------------------- local lang files
