@@ -117,6 +117,15 @@ _HEADING_RE = re.compile(r"^([ \t]*#{1,6}[ \t]+)(.*)$", re.S)
 _LIST_RE = re.compile(r"^([ \t]*(?:[-*+]|\d+\.)[ \t]+)(.*)$", re.S)
 _JSX_OPEN_RE = re.compile(r"^[ \t]*<[A-Za-z][A-Za-z0-9]*")
 _JSX_LINE_RE = re.compile(r"^[ \t]*<")
+# 圍欄程式碼區塊：``` 或 ~~~（3 個以上）。區塊內是程式碼,原樣保留不送翻。
+_FENCE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
+
+
+def _is_close_fence(line: str, fence_char: str, fence_len: int) -> bool:
+    """收尾圍欄：整行只由相同圍欄字元組成且長度 >= 開頭（開頭那行可帶語言標
+    示如 ```groovy,收尾行不得有其他內容)。"""
+    stripped = line.strip()
+    return len(stripped) >= fence_len and set(stripped) == {fence_char}
 
 
 def _push_paragraph(out: list, ctr: list[int], lines: list[str]) -> None:
@@ -153,6 +162,16 @@ def _body_segments(body: str, out: list, ctr: list[int]) -> None:
         line = lines[i]
         if not line.strip():
             out.append((None, line)); i += 1; continue
+        mf = _FENCE_RE.match(line)
+        if mf:
+            fence_char, fence_len = mf.group(1)[0], len(mf.group(1))
+            out.append((None, line)); i += 1          # 開頭圍欄
+            while i < len(lines):
+                cur = lines[i]
+                out.append((None, cur)); i += 1        # 程式碼內容 + 收尾圍欄原樣保留
+                if _is_close_fence(cur, fence_char, fence_len):
+                    break
+            continue
         if _JSX_LINE_RE.match(line):
             if re.match(r"^[ \t]*<Callout\b", line):
                 out.append((None, line)); i += 1

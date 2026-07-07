@@ -160,3 +160,43 @@ def test_all_extracted_values_are_nonempty_prose():
     for v in extract_mdx(REAL).values():
         assert v.strip()                     # 無空白段
         assert not v.lstrip().startswith("<")  # 未把 JSX 標籤當可翻
+
+
+# ── 圍欄程式碼區塊（```）原樣保留,不得抽出送翻（oracle_index gradle_task.mdx 失敗案例）──
+CODE = (
+    "---\r\ntitle: Gradle Sync\r\n---\r\n"
+    "\r\n"
+    "A gradle task may look as follows:\r\n"
+    "\r\n"
+    "```\r\n"
+    "tasks.named('processResources') {\r\n"
+    "    from(\"$rootDir/wiki\") {\r\n"
+    "        into \"assets/oracle_index/books/oritech\"\r\n"
+    "        exclude 'assets/item/**'   // items are rendered ingame\r\n"
+    "    }\r\n"
+    "}\r\n"
+    "```\r\n"
+    "\r\n"
+    "The files are added to the resources folder.\r\n"
+)
+
+def test_fenced_code_block_not_extracted():
+    vals = list(extract_mdx(CODE).values())
+    # 圍欄內的程式碼不得被當成可翻譯段落
+    assert not any("processResources" in v for v in vals)
+    assert not any("tasks.named" in v for v in vals)
+    assert not any("```" in v for v in vals)
+    # 前後散文仍要抽出
+    assert "A gradle task may look as follows:" in vals
+    assert "The files are added to the resources folder." in vals
+
+def test_fenced_code_block_rebuild_exact_when_untranslated():
+    assert rebuild_mdx(CODE, {}) == CODE
+
+def test_fenced_code_block_preserved_through_roundtrip():
+    got = extract_mdx(CODE)
+    k = next(key for key, v in got.items() if v.startswith("A gradle task"))
+    out = rebuild_mdx(CODE, {k: "gradle 任務範例如下："})
+    assert "gradle 任務範例如下：" in out
+    assert "tasks.named('processResources') {" in out   # 程式碼原封不動
+    assert out.count("```") == 2                          # 圍欄完整保留
