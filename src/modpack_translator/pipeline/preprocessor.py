@@ -29,6 +29,7 @@ _PLACEHOLDERS = re.compile(
     r'|%\d+\$[sdifcbxo%]'                  # positional: %1$s %2$d
     r'|%[sdifcbxo%]'                        # simple: %s %d %f
     r'|\$\$?[A-Za-z_][A-Za-z0-9_]*(?:=<[^>]*>)?'  # FancyMenu $$var / Patchouli $var、$player=<name>
+    r'|<[^<>\s]+>'                          # CLI 用法佔位符：<player|playerUuid>、<amount>
     # 資源位置 namespace:path（小寫、無空白、path 不以 . 結尾）：minecraft:player、c:ores
     r'|(?<![A-Za-z0-9_])[a-z_][a-z0-9_.-]*:[a-z_](?:[a-z0-9_./-]*[a-z0-9_/-])?'
     # 巢狀 NBT 大括號的整段無空白字串塊：{ 與 { 之間不得有 }，確保只吃真巢狀
@@ -158,6 +159,10 @@ _CODE_IDENTIFIER_RE = re.compile(
     r"|\b\w+(?:\.\w+)+(?::\d+)?\b"      # 點分識別字：q.player、some.menu.identifier:505280
     r"|'[^'\s]+'"                       # 引號包住的無空白字面值
     r'|"[^"\s]+"'
+    # 中文/全形引號包住的無空白字面值：譯文常把保留的英文指令詞（"display"、
+    # "count"…）改用「」『』“”‘’《》〈〉 包住，這些仍是被保留的字面值，
+    # 其中的小寫單字不算漏翻殘留。
+    r'|[「『“‘《〈][^「」『』“”‘’《》〈〉\s]+[」』”’》〉]'
 )
 # 括號內逗號分隔的小寫字面值枚舉：(left, right, middle)。這是變數的可能
 # 回傳值列表，譯文保留原文（含中文頓號分隔）不算漏翻。
@@ -297,6 +302,7 @@ _UNIT_WORDS = {
     "cf",
     "eu",
     "fe",
+    "kb",
     "mm",
     "mb",
     "ms",
@@ -433,6 +439,9 @@ def classify_translation_entry(key: str, value: str) -> str:
 def _is_metadata_key(key: str) -> bool:
     if key.endswith(".author") or ".author." in key:
         return True
+    # 作者署名（holiday.mekanism.signature = "-aidancbrady"）原樣保留
+    if key.endswith(".signature"):
+        return True
     if "painting." in key and key.endswith(".author"):
         return True
     # 唱片曲目說明（artist - title）：music_disc_*.desc、disc_*.desc 都是
@@ -468,7 +477,13 @@ def _is_copy_only_key_value(key: str, value: str) -> bool:
         ))
     ):
         return True
-    if key.endswith((".docs", ".discord", ".github", ".modrinth", ".wiki")):
+    # 社群/平台連結鍵：值是帳號代稱或連結（quark.gui.config.social.reddit =
+    # "/r/QuarkMod Reddit"），原樣保留。與上方 mod_menu 後綴清單一致。
+    if key.endswith((
+        ".docs", ".discord", ".github", ".modrinth", ".wiki",
+        ".reddit", ".twitter", ".mastodon", ".youtube",
+        ".patreon", ".kofi", ".curseforge", ".crowdin",
+    )):
         return True
     # 指令鍵下的單一小寫單字是指令字面值（如 create.command.killTPSCommand = "killtps"）
     if ".command" in key and re.fullmatch(r"[a-z][a-z0-9_-]{2,}", text):
@@ -515,6 +530,10 @@ def _is_untranslatable_value(value: str) -> bool:
         return True
     if _is_time_format(text):
         return True
+    if _is_consonant_acronym(text):
+        return True
+    if _looks_like_vocalization(text):
+        return True
     if _looks_like_color_code_art(text):
         return True
     return False
@@ -530,9 +549,54 @@ def _is_url_or_domain(text: str) -> bool:
     return bool(re.fullmatch(r"(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/\S*)?", plain, re.IGNORECASE))
 
 
+# 同字母重複 1-4 次的段（yyyy、MM、HH），段間以日期分隔符相連；兩段各自
+# 用獨立群組與反向參照（\1 與 \2），重複段每輪各自比對自己的字母。
+_DATE_FORMAT_RE = re.compile(
+    r"([yYMdDHhmsSaGEwWkK])\1{0,3}"
+    r"(?:[\s/:.,T-]+([yYMdDHhmsSaGEwWkK])\2{0,3})+"
+)
+_DATE_STRONG_LETTERS = set("yYMdDHhms")
+
+
 def _is_time_format(text: str) -> bool:
-    # 日期時間格式樣板（如 AE2 的 ETAFormat = "HH:mm:ss"）
-    return bool(re.fullmatch(r"[HhmsS]{1,2}(?::[HhmsS]{1,2}){1,2}", text))
+    # 日期/時間格式樣板（AE2 ETAFormat = "HH:mm:ss"、corpse date_format =
+    # "yyyy/MM/dd HH:mm:ss"）。以「同字母重複的段 + 分隔符」的樣式辨識，避免
+    # 湊巧只用到格式字母的散文（"same day"、"Yes Sir"）被誤判。
+    if not _DATE_FORMAT_RE.fullmatch(text):
+        return False
+    return any(ch in _DATE_STRONG_LETTERS for ch in text)
+
+
+def _is_consonant_acronym(text: str) -> bool:
+    """單一無母音的小寫縮寫（thermal *.keyword = "tnt"）視為不可譯。
+
+    真正的英文單字必含母音（a/e/i/o/u/y）；全由子音組成的 2-6 字母小寫單字
+    是縮寫/代號（tnt、rf、fe…），模型只能原樣返回而被輸出關卡誤殺。僅限
+    「整個值就是單一 token」時觸發，避免誤傷多字關鍵字（"blaze fire tnt"）。
+    """
+    if not re.fullmatch(r"[a-z]{2,6}", text):
+        return False
+    return not any(ch in "aeiouy" for ch in text)
+
+
+_VOCALIZATION_RUN_RE = re.compile(r"([A-Za-z])\1{3,}")
+
+
+def _looks_like_vocalization(text: str) -> bool:
+    """純母音擬聲吟唱（botania.subtitle.way 的 Ievan Polkka scat 唱段）。
+
+    幾乎全是母音、且含 4 個以上相同字母的連寫（"oooooooooo"、"AAAA"），
+    拼不出可翻譯的詞，任何模型輸出都無法通過驗證，直接視為不可譯。
+    散文母音比例約 0.4，永遠不會誤觸此門檻。
+    """
+    plain = _PLACEHOLDERS.sub(" ", text)
+    letters = re.findall(r"[A-Za-z]", plain)
+    if len(letters) < 12:
+        return False
+    vowels = sum(1 for ch in letters if ch.lower() in "aeiou")
+    if vowels / len(letters) < 0.8:
+        return False
+    return bool(_VOCALIZATION_RUN_RE.search(plain))
 
 
 def _looks_like_color_code_art(text: str) -> bool:

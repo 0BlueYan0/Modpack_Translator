@@ -264,3 +264,106 @@ def test_genuine_author_credit_still_skipped():
     assert classify_translation_entry(
         "quest.0000000000000009.quest_desc[0]", "Direwolf20 - Modpack Author"
     ) != "translate"
+
+
+# ── 6. Failed Items（Downloads 執行版）實際樣本回歸 ──────────────────────
+# 使用者回報的失敗清單分兩類：
+#   short_fragments — 本就不該送翻的值（日期格式、單位、署名、社群連結、
+#                     無母音縮寫關鍵字）被分類為 translate。
+#   natural_text    — 可譯散文，但輸出關卡誤殺（CLI <..> 佔位符、句中保留的
+#                     英文指令詞被改用中文引號包住後被當漏翻殘留）。
+
+def test_date_time_format_pattern_is_skipped():
+    # corpse: gui.corpse.death_history.date_format = "yyyy/MM/dd HH:mm:ss"
+    assert classify_translation_entry(
+        "gui.corpse.death_history.date_format", "yyyy/MM/dd HH:mm:ss"
+    ) != "translate"
+    # 既有純時間樣板仍要跳過
+    assert classify_translation_entry("gui.ae2.ETAFormat", "HH:mm:ss") != "translate"
+    assert classify_translation_entry("some.mod.date", "dd/MM/yyyy") != "translate"
+    # 但一般散文（湊巧只用到格式字母的兩個單字）仍要翻譯
+    assert classify_translation_entry("quest.x.desc", "same day") == "translate"
+    assert classify_translation_entry("quest.x.desc", "Yes Sir") == "translate"
+
+
+def test_fluid_kilobucket_unit_fragment_is_skipped():
+    # mantle: gui.mantle.fluid.kilobucket = "%s kb"
+    assert classify_translation_entry("gui.mantle.fluid.kilobucket", "%s kb") != "translate"
+
+
+def test_signature_key_is_copied():
+    # mekanism: holiday.mekanism.signature = "-aidancbrady"
+    assert classify_translation_entry(
+        "holiday.mekanism.signature", "-aidancbrady"
+    ) != "translate"
+
+
+def test_social_link_keys_are_copied():
+    # quark: quark.gui.config.social.reddit = "/r/QuarkMod Reddit"
+    assert classify_translation_entry(
+        "quark.gui.config.social.reddit", "/r/QuarkMod Reddit"
+    ) != "translate"
+    assert classify_translation_entry(
+        "mod.social.twitter", "@SomeMod on Twitter"
+    ) != "translate"
+    assert classify_translation_entry(
+        "mod.social.youtube", "SomeMod YouTube Channel"
+    ) != "translate"
+
+
+def test_consonant_acronym_keyword_is_skipped():
+    # thermal: *.keyword = "tnt"（全無母音的縮寫，模型原樣返回被輸出關卡誤殺）
+    assert classify_translation_entry("block.thermal.ender_tnt.keyword", "tnt") != "translate"
+    # 但多字關鍵字（含可譯英文詞）仍要翻譯
+    assert classify_translation_entry(
+        "block.thermal.machine.keyword", "energy rf storage"
+    ) == "translate"
+    # 一般含母音的單字仍要翻譯
+    assert classify_translation_entry("item.create.wrench", "wrench") == "translate"
+
+
+def test_vocalization_subtitle_is_skipped():
+    # botania: botania.subtitle.way = 純母音擬聲吟唱（Ievan Polkka），無可譯內容
+    way = (
+        "O-oooooooooo AAAAE-A-A-I-A-U-JO-oooooooooooo AAE-O-A-A-U-U-A-E-eee-ee-eee "
+        "AAAAE-A-E-I-E-A-JO-ooo-oo-oo-oo EEEEO-A-AAA-AAAA"
+    )
+    assert classify_translation_entry("botania.subtitle.way", way) != "translate"
+    # 一般字幕仍要翻譯
+    assert classify_translation_entry(
+        "botania.subtitle.some", "A mysterious sound echoes"
+    ) == "translate"
+
+
+def test_cli_angle_bracket_placeholder_command_is_usable():
+    # botaniamisc.command.skyblock.help.4：<player|playerUuid> 是 CLI 佔位符，
+    # 保留原樣不算「player」漏翻。
+    source = "/gardenofglass regen-island <player|playerUuid> - rebuilds the specified player's island"
+    target = "/gardenofglass regen-island <player|playerUuid> - 重建指定玩家的島嶼"
+    assert is_usable_translation(source, target)
+
+
+def test_cjk_quoted_command_words_not_counted_as_leak():
+    # botania.page.corporeaIndex6：句中保留的英文指令詞（"display"、"any"…）
+    # 被模型改用中文引號「」包住，不得被當成 display/any 漏翻殘留。
+    source = (
+        'The words "all" or "every" request every single item in the network matching the '
+        'given criteria; for example, "all apples" will retrieve every single apple '
+        '(as well as every item renamed to "apple") in the network.$(p)The words "count", '
+        '"show", "display" and "tell" won\'t retrieve any items, but will count them for the '
+        "requester's convenience."
+    )
+    target = (
+        "「all」或「every」這兩個詞會請求網路中所有符合條件的單一物品；"
+        "例如，「all apples」會取回網路中每一顆蘋果（以及所有被重新命名為「apple」的物品）。"
+        "$(p)「count」、「show」、「display」和「tell」這些詞不會取回任何物品，"
+        "但會為請求者統計數量以方便查看。"
+    )
+    assert is_usable_translation(source, target)
+
+
+def test_bare_cjk_quoted_generic_leak_still_rejected():
+    # 防過度放寬：真正漏翻（未保留在引號內的裸露 generic 詞）仍要擋下
+    source = "Click the claim button to get your reward."
+    target = "點擊 claim 按鈕領取 reward。"
+    assert not is_usable_translation(source, target)
