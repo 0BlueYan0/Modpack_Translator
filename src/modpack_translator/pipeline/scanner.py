@@ -22,7 +22,7 @@ class TranslationTarget:
     source_file: Path
     path_in_jar: str | None
     mod_id: str
-    format: str       # json_lang | legacy_lang | patchouli_json | ftbq_snbt | ftbq_inline_snbt | heracles_snbt | heracles_inline_snbt | bq_lang | kubejs_json | oracle_mdx | oracle_meta
+    format: str       # json_lang | legacy_lang | patchouli_json | ftbq_snbt | ftbq_inline_snbt | heracles_snbt | heracles_inline_snbt | bq_lang | kubejs_json | oracle_mdx | oracle_meta | guideme_md
     output_mode: str  # jar_inject | in_place
     output_lang_code: str = "zh_tw"
     target_path_in_jar: str | None = None      # 寫入目標:一律正規小寫（遊戲讀得到）
@@ -82,6 +82,7 @@ class ModpackScanner:
 
     def _scan_jar(self, jar_path: Path, lang_code: str, glossary=None) -> list[TranslationTarget]:
         targets: list[TranslationTarget] = []
+        guideme_root_cache: dict[str, bool] = {}
         try:
             with zipfile.ZipFile(jar_path) as zf:
                 names = zf.namelist()
@@ -133,6 +134,10 @@ class ModpackScanner:
 
                     else:
                         target = self._scan_oracle_book(zf, jar_path, name, parts, name_set, lang_code, glossary)
+                        if target is None:
+                            target = self._scan_guideme_page(
+                                zf, jar_path, name, parts, name_set, lang_code, glossary, guideme_root_cache
+                            )
                         if target is not None:
                             targets.append(target)
         except (zipfile.BadZipFile, OSError):
@@ -268,7 +273,7 @@ class ModpackScanner:
         existing = write if write in name_set else None
 
         if name.endswith(".mdx"):
-            if not self._oracle_mdx_needs_translation(zf, name, existing, glossary):
+            if not self._mdx_needs_translation(zf, name, existing, glossary):
                 return None
             return TranslationTarget(
                 source_file=jar_path, path_in_jar=name, mod_id=book,
@@ -287,7 +292,8 @@ class ModpackScanner:
             )
         return None
 
-    def _oracle_mdx_needs_translation(self, zf, source_path, existing_path, glossary) -> bool:
+    def _mdx_needs_translation(self, zf, source_path, existing_path, glossary) -> bool:
+        """MDX/GuideME md 頁需翻判定:來源可翻段 diff 既有譯頁後非空。oracle 與 guideme 共用。"""
         if getattr(self, "_include_translated", False):
             return True
         try:
@@ -303,6 +309,81 @@ class ModpackScanner:
             except (KeyError, UnicodeDecodeError):
                 existing = {}
         return bool(diff_keys(source, existing, glossary=glossary))
+
+    # ------------------------------------------------------------ GuideME 指南
+
+    # 既有翻譯樹目錄:_fr_fr、_zh_cn、_zh_tw…(GuideME LangUtil 的 "_"+語言碼 慣例)
+    _GUIDEME_LANG_DIR_RE = re.compile(r"^_[a-z]{2,3}_[a-z]{2,4}$")
+    # frontmatter 區塊(--- … ---)與其中的頂層 navigation: 鍵(GuideME 頁面專屬慣例)
+    _GUIDEME_FM_RE = re.compile(r"\A---[ \t]*\r?\n(.*?\r?\n)---[ \t]*\r?\n", re.S)
+    _GUIDEME_NAV_KEY_RE = re.compile(r"^navigation:[ \t]*\r?$", re.M)
+
+    def _scan_guideme_page(
+        self, zf, jar_path, name, parts, name_set, lang_code, glossary,
+        root_cache: dict[str, bool],
+    ) -> TranslationTarget | None:
+        """GuideME 指南頁(AE2 按 G 指南等)。頁面是 jar 內 assets/<ns>/<root>/**.md,
+        由 GuideME 依遊戲語言載入 <root>/_<lang>/<相同相對路徑> 的譯頁、逐頁 fallback 英文。
+        root 三種形態:assets/<ns>/guides/<a>/<b>(預設佈局)、assets/<ns>/<folder>(自訂,
+        如 ae2guide/guide)。以「root 子樹內存在 navigation frontmatter」資格審查,
+        排除 credits/README/lang 目錄等雜訊 .md。"""
+        if not name.endswith(".md"):
+            return None
+        root_parts = self._guideme_root_parts(parts)
+        if root_parts is None:
+            return None
+        rel_parts = parts[len(root_parts):]
+        if not rel_parts or not rel_parts[-1]:
+            return None
+        if any(self._GUIDEME_LANG_DIR_RE.match(p) for p in rel_parts[:-1]):
+            return None  # 既有翻譯樹(含我們寫出的 _zh_tw)不是來源:冪等
+        root = "/".join(root_parts)
+        if not self._guideme_root_qualified(zf, root, name_set, root_cache):
+            return None
+        rel = "/".join(rel_parts)
+        write = f"{root}/_{lang_code.lower()}/{rel}"
+        existing = next(
+            (f"{root}/_{cand}/{rel}" for cand in self._locale_candidates(lang_code)
+             if f"{root}/_{cand}/{rel}" in name_set),
+            None,
+        )
+        if not self._mdx_needs_translation(zf, name, existing, glossary):
+            return None
+        return TranslationTarget(
+            source_file=jar_path, path_in_jar=name, mod_id=parts[1],
+            format="guideme_md", output_mode="jar_inject",
+            output_lang_code=lang_code,
+            target_path_in_jar=write, existing_path_in_jar=existing,
+        )
+
+    @staticmethod
+    def _guideme_root_parts(parts: list[str]) -> list[str] | None:
+        """指南 root。guides 預設佈局取三層(guides/<ns>/<name>),否則取首層資料夾;
+        assets 直下的散檔與層數不足的 guides/ 無法安全定位 → None。"""
+        if len(parts) < 4 or parts[0] != "assets":
+            return None
+        if parts[2] == "guides":
+            return parts[:5] if len(parts) >= 6 else None
+        return parts[:3]
+
+    def _guideme_root_qualified(self, zf, root: str, name_set, cache: dict[str, bool]) -> bool:
+        if root in cache:
+            return cache[root]
+        prefix = root + "/"
+        ok = False
+        for candidate in name_set:
+            if not (candidate.startswith(prefix) and candidate.endswith(".md")):
+                continue
+            try:
+                raw = zf.read(candidate).decode("utf-8-sig")
+            except (KeyError, UnicodeDecodeError):
+                continue
+            m = self._GUIDEME_FM_RE.match(raw)
+            if m and self._GUIDEME_NAV_KEY_RE.search(m.group(1)):
+                ok = True
+                break
+        cache[root] = ok
+        return ok
 
     def _oracle_meta_needs_translation(self, zf, source_path, existing_path, glossary) -> bool:
         if getattr(self, "_include_translated", False):

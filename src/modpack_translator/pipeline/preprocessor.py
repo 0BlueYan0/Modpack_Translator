@@ -21,6 +21,13 @@ _PLACEHOLDERS = re.compile(
     r'|/\$'                                  # Patchouli shorthand close marker
     r'|\[#\]\([0-9A-Fa-f]*\)'                # Modonomicon markdown color markers
     r'|\((?:item|entry|category|book|command|http|https)://[^)]*\)'  # Modonomicon markdown link targets
+    # markdown 連結/圖片目標(GuideME/oracle 指南頁):](path.md#anchor)。目標無空白;
+    # 需前綴 ](lookbehind,保留 ] 讓模型看見完整 [文字] 括號對)才凍結,
+    # 一般括號詞 (optional) 仍可翻。
+    r'|(?<=\])\([^()\s]+\)'
+    # 行內 JSX/HTML 標籤(含屬性,GuideME <ItemLink id=… />、<Color color=…>、</Color>):
+    # 標籤名+屬性整段凍結,標籤「之間」的內文仍可翻。無空白的 <token> 由下方既有模式涵蓋。
+    r'|</?[A-Za-z][A-Za-z0-9]*(?:\s[^<>]*)?/?>'
     r'|\\?@[A-Z][A-Z0-9_]*@'                # legacy guide markers: @L@, \@L@, @PAGE@
     r'|\\n'                                 # escaped newline literal
     r'|\\&'                                 # escaped ampersand

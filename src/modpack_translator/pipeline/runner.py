@@ -427,7 +427,7 @@ def read_target_strings(target: TranslationTarget) -> dict[str, str]:
         return read_bq_lang(target.source_file)
     elif target.format == "kubejs_json":
         return read_json_lang(target.source_file, None)
-    elif target.format == "oracle_mdx":
+    elif target.format in ("oracle_mdx", "guideme_md"):
         return mdx.extract_mdx(read_jar_text(target.source_file, target.path_in_jar))
     elif target.format == "oracle_meta":
         return mdx.extract_meta(read_jar_text(target.source_file, target.path_in_jar))
@@ -448,7 +448,7 @@ def read_existing_target(target: TranslationTarget, lang_code: str) -> dict[str,
         if target.format == "patchouli_json":
             page = read_jar_json_file(target.source_file, existing_path)
             return read_patchouli_text(page)
-        if target.format == "oracle_mdx":
+        if target.format in ("oracle_mdx", "guideme_md"):
             if not existing_path:
                 return {}
             try:
@@ -501,8 +501,8 @@ def process_target(
     if target.format == "patchouli_json":
         return _process_patchouli(target, translator, cache, retry_count, cancel_check, on_pair_done)
 
-    if target.format == "oracle_mdx":
-        return _process_oracle_mdx(target, translator, cache, retry_count, cancel_check, on_pair_done)
+    if target.format in ("oracle_mdx", "guideme_md"):
+        return _process_mdx_page(target, translator, cache, retry_count, cancel_check, on_pair_done)
 
     if target.format == "oracle_meta":
         return _process_oracle_meta(target, translator, cache, retry_count, cancel_check, on_pair_done)
@@ -648,7 +648,7 @@ def _process_patchouli(
     return n_translated, n_cached, n_fallback, failed
 
 
-def _process_oracle_mdx(
+def _process_mdx_page(
     target: TranslationTarget,
     translator: Any,
     cache: dict[str, str],

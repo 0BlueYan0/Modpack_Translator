@@ -79,6 +79,7 @@ _FMT_NAME_MAP: dict[str, str] = {
     "kubejs_json":          "KubeJS JSON",
     "oracle_mdx":           "Oracle 指南內文 (MDX)",
     "oracle_meta":          "Oracle 指南目錄",
+    "guideme_md":           "GuideME 指南內文 (Markdown)",
 }
 
 
