@@ -25,6 +25,7 @@ from modpack_translator.pipeline.patcher import (
 )
 from modpack_translator.pipeline.postprocessor import process
 from modpack_translator.pipeline.preprocessor import (
+    _has_translatable_text,
     _preserves_required_tokens,
     classify_translation_entry,
     decode,
@@ -179,6 +180,12 @@ def _translate_validated(
     retry_count: int,
     cancel_check=None,
 ) -> tuple[str, bool]:
+    # 無可譯內容的來源（純設定語法行等）直接原樣通過，不呼叫模型。
+    # 整鍵層級已由 classify 過濾，這裡攔的是多行值切段後才出現的語法段
+    # （如 ETF 說明末行 "§aitems.<n>=<…>"），否則模型原樣返回必被誤殺。
+    if not _has_translatable_text(source):
+        return source, True
+
     static = _static_translation(source)
     if static is not None and is_usable_translation(source, static):
         return static, True

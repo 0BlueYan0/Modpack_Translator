@@ -75,6 +75,19 @@ def _normalized_translation_value(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
+# 全形↔半形標點摺疊：模型輸出 zh 時常把保留原文的標點換成全形
+# （"Chunky?" → "Chunky？"）。摺疊後相同即視為「原樣返回」，交由專有
+# 名詞豁免等既有規則判斷；非專有名詞來源摺疊後相同仍照樣拒絕，不放寬。
+_PUNCT_WIDTH_FOLD = str.maketrans({
+    "？": "?", "！": "!", "：": ":", "；": ";", "，": ",",
+    "（": "(", "）": ")", "。": ".", "、": ",", "～": "~",
+})
+
+
+def _folded_punct(value: str) -> str:
+    return value.translate(_PUNCT_WIDTH_FOLD)
+
+
 def _has_translatable_text(value: str) -> bool:
     if _is_structural_text(value):
         return False
@@ -126,7 +139,7 @@ def is_usable_translation(
     if not dst:
         return False
     needs_visible_translation = _requires_visible_translation(source)
-    if dst == src:
+    if dst == src or _folded_punct(dst) == _folded_punct(src):
         if not needs_visible_translation:
             return True
         # 用語庫守門：整串命中用語庫的原樣返回一律不放行——凌駕下方的
@@ -156,6 +169,7 @@ _CODE_IDENTIFIER_RE = re.compile(
     r"|%\w+%"                           # 佔位符變數：%player%
     r"|@\w+(?:\([^()]*\))?"             # 實體過濾器：@player、@animal(age=adult)
     r"|#[\w-]{2,}"                      # 頻道 / 標籤：#allthemons-techsupport
+    r"|\b[\w.]+=\S*"                    # 設定賦值字面：items.1=any、key=value
     r"|\b\w+(?:\.\w+)+(?::\d+)?\b"      # 點分識別字：q.player、some.menu.identifier:505280
     r"|'[^'\s]+'"                       # 引號包住的無空白字面值
     r'|"[^"\s]+"'
@@ -302,6 +316,7 @@ _UNIT_WORDS = {
     "cf",
     "eu",
     "fe",
+    "fps",
     "kb",
     "mm",
     "mb",
@@ -488,6 +503,15 @@ def _is_copy_only_key_value(key: str, value: str) -> bool:
     # 指令鍵下的單一小寫單字是指令字面值（如 create.command.killTPSCommand = "killtps"）
     if ".command" in key and re.fullmatch(r"[a-z][a-z0-9_-]{2,}", text):
         return True
+    # 值=鍵尾片段的開發用識別字（painting prototype_701、tooltip taskdesc3）：
+    # 純小寫單一 token、含數字或底線、且整個值出現在鍵名中 → 佔位殘字/代號，
+    # 模型只能原樣返回，原樣保留。一般顯示名稱（Diamond、stone）無數字底線不中。
+    if (
+        re.fullmatch(r"[a-z][a-z0-9_]*", text)
+        and re.search(r"[0-9_]", text)
+        and _value_slug_in_key(key, text)
+    ):
+        return True
     if key.endswith((".color", ".colour")) and _HEX_COLOR_RE.fullmatch(text):
         return True
     if ".configuration." in key and key.endswith((".title", ".toml.title")) and _looks_like_config_title(text):
@@ -527,6 +551,12 @@ def _is_untranslatable_value(value: str) -> bool:
     if _looks_like_credit(text):
         return True
     if _looks_like_code_or_table_line(text):
+        return True
+    if _looks_like_function_signature(text):
+        return True
+    if _looks_like_command_usage(text):
+        return True
+    if _looks_like_config_assignment(text):
         return True
     if _is_time_format(text):
         return True
@@ -669,6 +699,61 @@ def _looks_like_credit(text: str) -> bool:
     return len(re.findall(r"\S+", left)) <= 4
 
 
+_FUNC_SIGNATURE_ARG_RE = re.compile(
+    r"[A-Za-z_][A-Za-z0-9_]*"          # 參數名
+    r"(?:\s*(?:\?:|=)\s*[^,]*)?"       # 選填預設值（?: ''）或型別枚舉（=Object|String）
+)
+
+
+def _looks_like_function_signature(text: str) -> bool:
+    """整串是函式呼叫簽名（craftpresence *.usage："asIcon(input, …)"、"length(input)"）。
+
+    程式碼用法示範的正確譯文必為原樣，模型原樣返回會被輸出關卡誤殺，
+    直接視為不可譯。名稱限小寫開頭（散文複數標記 "Item(s)" 首字大寫不中）；
+    lowerCamelCase 名稱必為程式識別字，全小寫名稱另要求每個參數都像識別字
+    且參數名 ≥3 字元（"second(s)" 的複數標記不中）。
+    """
+    m = re.fullmatch(r"([a-z_][A-Za-z0-9_]*)\((.*)\)", text.strip())
+    if not m:
+        return False
+    name, args = m.groups()
+    if re.search(r"[a-z][A-Z]", name):
+        return True
+    parts = [part.strip() for part in args.split(",")]
+    if not all(_FUNC_SIGNATURE_ARG_RE.fullmatch(part) for part in parts):
+        return False
+    return all(
+        len(re.match(r"[A-Za-z_][A-Za-z0-9_]*", part).group(0)) >= 3 for part in parts
+    )
+
+
+def _looks_like_command_usage(text: str) -> bool:
+    """整串是斜線指令用法（ftbquests："/ftbquests export_rewards_to_chest <reward_table>"）。
+
+    佔位符（<arg>）以外全為小寫指令 token 且總長 ≤4 個 token 才算；
+    含大寫、撇號或較長散文的指令說明（"/home Teleports you to your Home"）
+    不受影響，仍要翻譯。
+    """
+    plain = _PLACEHOLDERS.sub(" ", text).strip()
+    if not plain.startswith("/"):
+        return False
+    if not re.fullmatch(r"/[a-z][a-z0-9_:-]*(?:\s+[a-z0-9_@.\[\]|:<>-]+)*", plain):
+        return False
+    return len(plain.split()) <= 4
+
+
+def _looks_like_config_assignment(text: str) -> bool:
+    """整串是無空白的設定語法行（ETF："§aitems.<n>=<list|none|any|holding|wearing>"）。
+
+    佔位符與色碼以外只剩鍵名、= 與枚舉分隔符，無散文可翻，模型只能
+    原樣返回，直接視為不可譯。"""
+    stripped = text.strip()
+    if "=" not in stripped or re.search(r"\s", stripped):
+        return False
+    plain = _PLACEHOLDERS.sub("", stripped)
+    return bool(re.fullmatch(r"[A-Za-z0-9_.,|:=<>/\[\]()-]*", plain))
+
+
 def _looks_like_config_title(text: str) -> bool:
     return bool(re.search(r"\b(?:config|configuration|toml)\b", text, re.IGNORECASE))
 
@@ -701,9 +786,20 @@ def _looks_like_code_or_table_line(text: str) -> bool:
     return False
 
 
+# 鍵盤快捷鍵和弦（Alt+F3、Ctrl+Shift+S）：修飾鍵/功能鍵/單一字元以 + 相連。
+# 整組視為快捷鍵標記剝除，否則 "FPS / TPS (Alt+F3)" 的 Alt 會被當一般英文詞
+# 送翻，模型原樣返回再被輸出關卡誤殺。
+_KEY_CHORD_PART = r"(?:ctrl|alt|shift|cmd|meta|option|control|tab|esc|del|ins|end|home|f\d{1,2}|[a-z0-9])"
+_KEY_CHORD_RE = re.compile(
+    rf"\b{_KEY_CHORD_PART}(?:\s*\+\s*{_KEY_CHORD_PART})+\b",
+    re.IGNORECASE,
+)
+
+
 def _requires_visible_translation(source: str) -> bool:
     text = _PLACEHOLDERS.sub(" ", source)
     text = re.sub(r"[a-z][a-z0-9+.-]*://\S+", " ", text, flags=re.IGNORECASE)
+    text = _KEY_CHORD_RE.sub(" ", text)
     words = re.findall(r"[A-Za-z][A-Za-z'-]*", text)
     return any(_is_translation_required_word(word) for word in words)
 

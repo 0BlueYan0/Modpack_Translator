@@ -367,3 +367,201 @@ def test_bare_cjk_quoted_generic_leak_still_rejected():
     source = "Click the claim button to get your reward."
     target = "點擊 claim 按鈕領取 reward。"
     assert not is_usable_translation(source, target)
+
+
+# ── 7. Failed Items 第二輪（Beyond Depth 模組包）實際樣本回歸 ────────────
+# 根因分四類：
+#   a. 程式碼樣貌的值（函式簽名、斜線指令用法、設定語法行）被分類 translate，
+#      模型只能原樣返回而被輸出關卡誤殺（craftpresence ×38、ftbquests usage、
+#      ETF 說明末行）。
+#   b. 單位/快捷鍵縮寫不在既有詞表（fps 不在 _UNIT_WORDS、Alt+F3 和弦的 Alt
+#      被當一般英文詞），原樣返回被誤殺（betterf3 ×2）。
+#   c. 值=鍵尾片段的開發用識別字（taskdesc3、prototype_701）被送翻。
+#   d. 輸出關卡：正確譯文保留 items.1=any 賦值字面後 "any" 被當漏翻殘留
+#      （ETF）；專有名詞標題的全形標點變體（Chunky？）被「無 CJK」規則誤殺。
+
+def test_camelcase_function_signature_is_skipped():
+    # craftpresence.placeholders.*.usage 共 38 條函式簽名
+    assert classify_translation_entry(
+        "craftpresence.placeholders.asIcon.usage", "asIcon(input, whitespaceIndex ?: '')"
+    ) != "translate"
+    assert classify_translation_entry(
+        "craftpresence.placeholders.getFields.usage", "getFields(classObj=Object|String|Class)"
+    ) != "translate"
+    assert classify_translation_entry(
+        "craftpresence.placeholders.isWithinValue.usage",
+        "isWithinValue(value, min, max, contains_min ?: false, contains_max ?: false, "
+        "check_sanity ?: true)",
+    ) != "translate"
+    assert classify_translation_entry(
+        "craftpresence.placeholders.timeToEpochMilli.usage", "timeToEpochMilli(data)"
+    ) != "translate"
+
+
+def test_lowercase_function_signature_is_skipped():
+    # 全小寫名稱的簽名（length(input)）也要跳過
+    assert classify_translation_entry(
+        "craftpresence.placeholders.length.usage", "length(input)"
+    ) != "translate"
+
+
+def test_plural_parenthetical_still_translates():
+    # 防過度放寬：「Item(s)」「second(s)」是散文複數標記，不是函式簽名
+    assert classify_translation_entry("gui.mod.items", "Item(s)") == "translate"
+    assert classify_translation_entry("gui.mod.seconds", "second(s)") == "translate"
+
+
+def test_slash_command_usage_is_skipped():
+    # ftbquests: commands.ftbquests.export_rewards_to_chest.usage
+    assert classify_translation_entry(
+        "commands.ftbquests.export_rewards_to_chest.usage",
+        "/ftbquests export_rewards_to_chest <reward_table>",
+    ) != "translate"
+
+
+def test_command_help_prose_still_translates():
+    # 防過度放寬：以斜線指令開頭但含散文說明的句子仍要翻譯
+    assert classify_translation_entry(
+        "commands.mod.home.help", "/home Teleports you to your Home"
+    ) == "translate"
+    assert classify_translation_entry(
+        "commands.mod.spawn.help", "/spawn teleports you back to the world spawn point"
+    ) == "translate"
+
+
+def test_fps_unit_fragment_is_skipped():
+    # betterf3: format.betterf3.fps = "%s fps / %s fps %s"（fps 與 tps 同為單位）
+    assert classify_translation_entry(
+        "format.betterf3.fps", "%s fps / %s fps %s"
+    ) != "translate"
+
+
+def test_keybind_chord_acronym_line_is_skipped():
+    # betterf3: text.betterf3.line.fps_tps = "FPS / TPS (Alt+F3)"
+    # 內容字全為縮寫/快捷鍵和弦，無可譯文字
+    assert classify_translation_entry(
+        "text.betterf3.line.fps_tps", "FPS / TPS (Alt+F3)"
+    ) != "translate"
+
+
+def test_chord_with_prose_still_translates():
+    # 防過度放寬：快捷鍵和弦旁有散文仍要翻譯
+    assert classify_translation_entry(
+        "key.mod.fly.desc", "Press Ctrl+F to toggle flying"
+    ) == "translate"
+
+
+def test_key_echo_identifier_is_copied():
+    # caverns_and_chasms 畫作標題、realmrpg 佔位殘字：值=鍵尾的識別字
+    assert classify_translation_entry(
+        "painting.caverns_and_chasms.prototype_701.title", "prototype_701"
+    ) != "translate"
+    assert classify_translation_entry(
+        "gui.realmrpg_quests.quest_book_page_a.tooltip_taskdesc3", "taskdesc3"
+    ) != "translate"
+
+
+def test_key_echo_display_name_still_translates():
+    # 防過度放寬：一般顯示名稱（值=鍵尾但為正常單字，無數字/底線）仍要翻譯
+    assert classify_translation_entry("item.minecraft.diamond", "Diamond") == "translate"
+    assert classify_translation_entry("block.minecraft.stone", "stone") == "translate"
+
+
+def test_config_assignment_syntax_line_is_skipped():
+    # ETF 說明末行：§aitems.<n>=<list|none|any|holding|wearing> 純設定語法
+    assert classify_translation_entry(
+        "config.entity_texture_features.property_explanation.items",
+        "§aitems.<n>=<list|none|any|holding|wearing>",
+    ) != "translate"
+
+
+def test_config_assignment_literal_not_counted_as_leak():
+    # ETF：正確譯文保留 items.1=any 範例語法，"any" 不得算漏翻殘留
+    source = "Example: items.1=any    (matches a mob holding or wearing any item)"
+    target = "範例：items.1=any    （符合手持或穿戴任意物品的生物）"
+    assert is_usable_translation(source, target)
+
+
+def test_etf_full_property_explanation_translation_usable():
+    # ETF 整串多行說明：正確中譯（保留全部設定範例語法）必須可用
+    source = (
+        "Items \n"
+        "Select whether a mob must have certain, or any, items equipped or held\n"
+        "Example: items.1=minecraft:book cool_mod:sunglasses   "
+        "(matches a mob holding or wearing one of these items)\n"
+        "Example: items.1=any                                  "
+        "(matches a mob holding or wearing any item)\n"
+        "Example: items.1=wearing                              "
+        "(matches a mob wearing any item)\n"
+        "Example: items.1=none                                 "
+        "(matches a mob holding or wearing no items)\n"
+        "§aitems.<n>=<list|none|any|holding|wearing>"
+    )
+    target = (
+        "物品 \n"
+        "選擇生物是否必須裝備或手持特定（或任意）物品\n"
+        "範例：items.1=minecraft:book cool_mod:sunglasses   "
+        "（符合手持或穿戴其中一件物品的生物）\n"
+        "範例：items.1=any                                  "
+        "（符合手持或穿戴任意物品的生物）\n"
+        "範例：items.1=wearing                              "
+        "（符合穿戴任意物品的生物）\n"
+        "範例：items.1=none                                 "
+        "（符合未手持且未穿戴任何物品的生物）\n"
+        "§aitems.<n>=<list|none|any|holding|wearing>"
+    )
+    assert is_usable_translation(source, target)
+
+
+def test_fullwidth_punct_identical_proper_noun_accepted():
+    # ftbq mowzie 任務標題 "Chunky?"：模型保留原文但改用全形問號（U+FF1F），
+    # 摺疊後視為原樣返回，走專有名詞豁免
+    assert is_usable_translation(
+        "Chunky?", "Chunky？", accept_identical_proper_noun=True
+    )
+
+
+def test_fullwidth_punct_variant_of_sentence_still_rejected():
+    # 防過度放寬：非專有名詞的句子換全形標點仍不可用
+    source = "It's tough you'll need to prepare!"
+    assert not is_usable_translation(
+        source, "It's tough you'll need to prepare！", accept_identical_proper_noun=True
+    )
+
+
+def test_untranslatable_segment_short_circuits_without_model_call():
+    # 多行值切段後的純語法行（ETF 末行）直接原樣通過，不呼叫模型
+    from modpack_translator.pipeline.runner import _translate_validated
+
+    class BoomTranslator:
+        glossary = None
+
+        def translate(self, text, cancel_check=None):
+            raise AssertionError("純語法行不應呼叫模型")
+
+    line = "§aitems.<n>=<list|none|any|holding|wearing>"
+    final, ok = _translate_validated(BoomTranslator(), line, 0)
+    assert ok
+    assert final == line
+
+
+def test_translate_dict_skips_function_signatures_without_model_call():
+    # 函式簽名條目經 classify 過濾後不進 diff、不呼叫模型、不進 failed
+    from modpack_translator.pipeline.runner import translate_dict
+
+    class BoomTranslator:
+        glossary = None
+        pack_context = None
+
+        def translate(self, text, cancel_check=None):
+            raise AssertionError("函式簽名不應呼叫模型")
+
+    en = {
+        "craftpresence.placeholders.asIcon.usage": "asIcon(input, whitespaceIndex ?: '')",
+        "craftpresence.placeholders.length.usage": "length(input)",
+    }
+    result, n_translated, n_cached, n_fallback, failed = translate_dict(
+        en, {}, BoomTranslator(), {}
+    )
+    assert failed == {}
+    assert n_fallback == 0
