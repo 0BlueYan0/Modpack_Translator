@@ -189,14 +189,18 @@ def _push_paragraph(out: list, ctr: list[int], lines: list[str]) -> None:
 
 
 def _is_inline_prose_start(line: str) -> bool:
-    """行首為標籤,但行內所有標籤同行完結、去標籤後仍有實質文字
-    → 是段落散文(如 <Color …>south</Color>, … 的段落續行),不是 JSX 塊。"""
+    """行首為標籤,但行內所有標籤同行完結、去標籤後仍有任何非空白殘餘
+    → 是段落散文(如 <Color …>south</Color>, … 的段落續行),不是 JSX 塊。
+    殘餘只看「非空白」而非字母數字:en 行尾 `<ItemLink />s.` 與譯文行尾
+    `<ItemLink />。`(CJK 標點)必須同判為散文,否則 en/zh 抽取不對稱,
+    已翻段落會被誤判缺 token 而每輪重翻。純標點段落由 _push_text 的
+    可譯字元守門擋下,不會送翻。"""
     if not _JSX_OPEN_RE.match(line):
         return False
     residue = _TAG_SPAN_RE.sub("", line)
     if "<" in residue:
         return False  # 有未完結(跨行)標籤 → 交給 JSX 塊處理
-    return _has_translatable_char(_IMG_MD_RE.sub("", residue))
+    return bool(_IMG_MD_RE.sub("", residue).strip())
 
 
 def _para_break(line: str) -> bool:

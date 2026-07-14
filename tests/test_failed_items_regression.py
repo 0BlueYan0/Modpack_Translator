@@ -565,3 +565,35 @@ def test_translate_dict_skips_function_signatures_without_model_call():
     )
     assert failed == {}
     assert n_fallback == 0
+
+
+# ── 5. v1.8.0 GuideME 實跑樣本(2026-07-14):公式行與指令用法文法 ──────
+
+def test_energy_ratio_line_classified_like_forge_sibling():
+    """AE2 ae2guide energy.md 的換算式清單:相鄰 Forge 行因 forge/fe/ae 在豁免清單
+    而 skip,Fabric 行必須一致(fabric 同為 mod 載入器名),否則永遠送翻永遠失敗。"""
+    assert classify_translation_entry("s7", "2 FE = 1 AE (Forge)") != "translate"
+    assert classify_translation_entry("s8", "1 E  = 2 AE (Fabric)") != "translate"
+
+
+LOOTR_USAGE = (
+    "/lootr cart | cart <loot-table> | %s | custom-chest | "
+    "custom-area <x> <y> <z> <x> <y> <z> | refresh | decay | open_as <player> | "
+    "open_as_uuid <uuid> | id | openers | clear <player> | cclear <entity matcher>"
+)
+
+
+def test_command_usage_grammar_is_copy():
+    """lootr.commands.usage:值是指令文法一覽(/子指令 | 子指令 <參數> | …),
+    mod 自帶 zh_tw 也原樣保留;模型只能原樣返回,必須分類為 copy。"""
+    assert classify_translation_entry("lootr.commands.usage", LOOTR_USAGE) == "copy"
+
+
+def test_prose_with_pipes_or_slash_still_translatable():
+    # 含管線符的散文(不以 / 起頭)與單一指令的說明文(無多重管線)仍要翻
+    assert classify_translation_entry(
+        "x.desc", "Use the hopper | filter | sorter combo to sort items."
+    ) == "translate"
+    assert classify_translation_entry(
+        "x.cmd_help", "/home teleports you to your home point."
+    ) == "translate"

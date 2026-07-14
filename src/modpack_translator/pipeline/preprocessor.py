@@ -263,6 +263,7 @@ _TRANSLATION_OPTIONAL_WORDS = {
     "cf",
     "emi",
     "eu",
+    "fabric",
     "fe",
     "forge",
     "ftb",
@@ -509,6 +510,11 @@ def _is_copy_only_key_value(key: str, value: str) -> bool:
         return True
     # 指令鍵下的單一小寫單字是指令字面值（如 create.command.killTPSCommand = "killtps"）
     if ".command" in key and re.fullmatch(r"[a-z][a-z0-9_-]{2,}", text):
+        return True
+    # 指令用法文法一覽（lootr.commands.usage = "/lootr cart | cart <loot-table> | …"）：
+    # 以 / 起頭且含多重 | 分隔的子指令與 <參數> 佔位，是語法非散文，模型只能原樣
+    # 返回；含管線的散文不以 / 起頭、單一指令說明文無多重管線，皆不受影響。
+    if text.startswith("/") and text.count("|") >= 2:
         return True
     # 值=鍵尾片段的開發用識別字（painting prototype_701、tooltip taskdesc3）：
     # 純小寫單一 token、含數字或底線、且整個值出現在鍵名中 → 佔位殘字/代號，

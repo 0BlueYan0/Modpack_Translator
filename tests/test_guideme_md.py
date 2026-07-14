@@ -289,3 +289,35 @@ def test_callout_behavior_unchanged():
     got = extract_mdx(CALLOUT_BODY)
     assert "The forests will fall." in got.values()
     assert rebuild_mdx(CALLOUT_BODY, {}) == CALLOUT_BODY
+
+# ── 行尾內聯標籤+標點(en "s." vs zh "。")的抽取對稱性 ──────────────────
+# 實跑案例:me-network-connections.md 譯文正確寫入,但 zh 行 `<ItemLink />。`
+# 的殘餘只有 CJK 標點,被當 JSX 行切出段落 → 段落比對誤判缺 token → 每輪重翻。
+
+TRAILING_TAG_EN = (
+    "Parts like <ItemLink id=\"import_bus\" />ses, and\n"
+    "<ItemLink id=\"cable_interface\" />s.\n"
+)
+TRAILING_TAG_ZH = (
+    "像是 <ItemLink id=\"import_bus\" />，以及\n"
+    "<ItemLink id=\"cable_interface\" />。\n"
+)
+
+def test_trailing_tag_line_with_cjk_punct_stays_in_paragraph():
+    got = extract_mdx(TRAILING_TAG_ZH)
+    vals = list(got.values())
+    assert len(vals) == 1                                        # 兩行是同一段
+    assert '<ItemLink id="cable_interface" />。' in vals[0]
+    assert rebuild_mdx(TRAILING_TAG_ZH, {}) == TRAILING_TAG_ZH
+
+def test_en_zh_extraction_alignment_with_trailing_tag_line():
+    from modpack_translator.pipeline.preprocessor import diff_keys
+    en_seg = extract_mdx(TRAILING_TAG_EN)
+    zh_seg = extract_mdx(TRAILING_TAG_ZH)
+    assert list(en_seg.keys()) == list(zh_seg.keys())            # 位置鍵對齊
+    assert diff_keys(en_seg, zh_seg) == set()                    # 已翻不得再標待翻
+
+def test_pure_tag_line_still_literal_after_relaxation():
+    body = "<ItemLink id=\"import_bus\" />\n\nProse here.\n"
+    vals = list(extract_mdx(body).values())
+    assert vals == ["Prose here."]                               # 純標籤行仍不送翻
