@@ -280,6 +280,9 @@ uv run python scripts/translate_modpack.py --modpack "C:/CurseForge/Instances/AT
 | `heracles_inline_snbt` | `.snbt` | Heracles 直接文字欄位 |
 | `bq_lang` | `.lang` | Better Questing 語言格式（1.12） |
 | `kubejs_json` | `.json` | KubeJS 腳本翻譯檔 |
+| `oracle_mdx` / `oracle_meta` | `.mdx` / `.json` | Oracle Index 指南書內文（oritech 等） |
+| `guideme_md` | `.md` | GuideME 指南頁（AE2 按 G 指南等） |
+| `rct_names` | `.json` | Radical Cobblemon Trainers 訓練家名稱（世界名牌／訓練家卡） |
 
 ---
 

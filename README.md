@@ -282,6 +282,9 @@ uv run python scripts/translate_modpack.py --modpack "C:/CurseForge/Instances/AT
 | `heracles_inline_snbt` | `.snbt` | Heracles inline text fields |
 | `bq_lang` | `.lang` | Better Questing language format (1.12) |
 | `kubejs_json` | `.json` | KubeJS script translation files |
+| `oracle_mdx` / `oracle_meta` | `.mdx` / `.json` | Oracle Index guidebook pages (oritech etc.) |
+| `guideme_md` | `.md` | GuideME guide pages (AE2 in-game guide etc.) |
+| `rct_names` | `.json` | Radical Cobblemon Trainers trainer names (nameplates / trainer card) |
 
 ---
 

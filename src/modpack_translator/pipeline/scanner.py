@@ -6,7 +6,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from modpack_translator.pipeline import mdx
+from modpack_translator.pipeline import mdx, rct
 from modpack_translator.pipeline.preprocessor import (
     diff_keys,
     parse_json_lang,
@@ -22,7 +22,7 @@ class TranslationTarget:
     source_file: Path
     path_in_jar: str | None
     mod_id: str
-    format: str       # json_lang | legacy_lang | patchouli_json | ftbq_snbt | ftbq_inline_snbt | heracles_snbt | heracles_inline_snbt | bq_lang | kubejs_json | oracle_mdx | oracle_meta | guideme_md
+    format: str       # json_lang | legacy_lang | patchouli_json | ftbq_snbt | ftbq_inline_snbt | heracles_snbt | heracles_inline_snbt | bq_lang | kubejs_json | oracle_mdx | oracle_meta | guideme_md | rct_names
     output_mode: str  # jar_inject | in_place
     output_lang_code: str = "zh_tw"
     target_path_in_jar: str | None = None      # 寫入目標:一律正規小寫（遊戲讀得到）
@@ -70,6 +70,7 @@ class ModpackScanner:
             targets.extend(self._scan_heracles(root, lang_code, glossary))
             targets.extend(self._scan_betterquesting(root, lang_code, glossary))
             targets.extend(self._scan_kubejs(root, lang_code, glossary))
+            targets.extend(self._scan_rct_local(root, lang_code, glossary))
 
             return targets
         finally:
@@ -140,6 +141,10 @@ class ModpackScanner:
                             )
                         if target is not None:
                             targets.append(target)
+
+                rct_target = self._scan_rct_jar_names(zf, jar_path, name_set, lang_code, glossary)
+                if rct_target is not None:
+                    targets.append(rct_target)
         except (zipfile.BadZipFile, OSError):
             pass
         return targets
@@ -256,6 +261,89 @@ class ModpackScanner:
                 target_page = {}
             existing = read_patchouli_text(target_page)
         return bool(diff_keys(source, existing, glossary=glossary))
+
+    # ------------------------------------------ RCT（rctmod）訓練家名稱
+
+    def _scan_rct_jar_names(
+        self, zf: zipfile.ZipFile, jar_path: Path, name_set: set[str],
+        lang_code: str, glossary=None,
+    ) -> TranslationTarget | None:
+        """rctmod 訓練家名稱：data/rctmod/trainers/*.json 的 "name" 需要
+        trainer.rctmod.<id>.name lang 鍵才會在世界名牌/GUI 顯示譯名
+        （mod 以 translatableWithFallback 渲染，無鍵時顯示資料檔英文名）。
+        目標寫入該 jar 的 assets/rctmod/lang/<lang>.json，與 json_lang 目標
+        同檔——寫入端讀既有內容合併，先後處理皆不互相覆蓋。"""
+        if not any(
+            n.startswith(rct.TRAINERS_PREFIX) and n.endswith(".json")
+            for n in name_set
+        ):
+            return None
+        write_path = f"{rct.LANG_DIR_IN_JAR}/{lang_code.lower()}.json"
+        existing = next(
+            (f"{rct.LANG_DIR_IN_JAR}/{cand}"
+             for cand in self._lang_code_candidates(lang_code, "json")
+             if f"{rct.LANG_DIR_IN_JAR}/{cand}" in name_set),
+            None,
+        )
+        if not getattr(self, "_include_translated", False):
+            names = rct.read_zip_trainer_names(zf)
+            if not names:
+                return None
+            existing_lang: dict[str, str] = {}
+            if existing:
+                try:
+                    existing_lang = parse_json_lang(zf.read(existing).decode("utf-8-sig"))
+                except (KeyError, UnicodeDecodeError, json.JSONDecodeError):
+                    existing_lang = {}
+            if not diff_keys(names, existing_lang, glossary=glossary):
+                return None
+        return TranslationTarget(
+            source_file=jar_path,
+            path_in_jar=rct.TRAINERS_PREFIX,
+            mod_id="rctmod",
+            format="rct_names",
+            output_mode="jar_inject",
+            output_lang_code=lang_code,
+            target_path_in_jar=write_path,
+            existing_path_in_jar=existing,
+        )
+
+    def _scan_rct_local(self, modpack_path: Path, lang_code: str, glossary=None) -> list[TranslationTarget]:
+        """modpack 本地（kubejs/data）自加的 rctmod 訓練家。名稱鍵寫入
+        kubejs/assets/rctmod/lang/<lang>.json——KubeJS 資源包會載入，
+        語言系統跨資源包逐鍵合併，不影響 mod jar 內的譯檔。"""
+        trainers_dir = modpack_path / "kubejs" / "data" / "rctmod" / "trainers"
+        if not trainers_dir.is_dir():
+            return []
+        lang_dir = modpack_path / "kubejs" / "assets" / "rctmod" / "lang"
+        write_file = lang_dir / f"{lang_code.lower()}.json"
+        existing_file = next(
+            (lang_dir / cand for cand in self._lang_code_candidates(lang_code, "json")
+             if (lang_dir / cand).exists()),
+            None,
+        )
+        if not getattr(self, "_include_translated", False):
+            names = rct.read_dir_trainer_names(trainers_dir)
+            if not names:
+                return []
+            existing: dict[str, str] = {}
+            if existing_file is not None:
+                try:
+                    existing = parse_json_lang(existing_file.read_text(encoding="utf-8"))
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                    existing = {}
+            if not diff_keys(names, existing, glossary=glossary):
+                return []
+        return [TranslationTarget(
+            source_file=trainers_dir,
+            path_in_jar=None,
+            mod_id="rctmod",
+            format="rct_names",
+            output_mode="in_place",
+            output_lang_code=lang_code,
+            target_file=write_file,
+            existing_file=existing_file,
+        )]
 
     # ------------------------------------------------------------ Oracle wiki
 

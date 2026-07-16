@@ -7,7 +7,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from modpack_translator.pipeline import mdx
+from modpack_translator.pipeline import mdx, rct
 from modpack_translator.pipeline.patcher import (
     read_jar_json_file,
     read_jar_json_lang,
@@ -25,6 +25,7 @@ from modpack_translator.pipeline.patcher import (
 )
 from modpack_translator.pipeline.postprocessor import process
 from modpack_translator.pipeline.preprocessor import (
+    STATIC_TRANSLATIONS as _STATIC_TRANSLATIONS,
     _has_translatable_text,
     _preserves_required_tokens,
     classify_translation_entry,
@@ -129,15 +130,6 @@ _HAS_LETTER_RE = re.compile(r"[A-Za-z]")
 _PATCHOULI_SEGMENT_SPLIT_RE = re.compile(r"(\$\((?:p|br2?|li\d*)\)|\\?@[A-Z][A-Z0-9_]*@)")
 _GENERIC_SEGMENT_SPLIT_RE = re.compile(r"(\r?\n+|\\?@(?:L|PAGE)@)")
 _SENTENCE_SEGMENT_SPLIT_RE = re.compile(r"(?<=[.!?])(\s+)")
-_STATIC_TRANSLATIONS = {
-    "Bosses": "首領",
-    "Cat": "貓",
-    "Chicken": "雞",
-    "Cow": "牛",
-    "Pig": "豬",
-    "Sheep": "綿羊",
-    "Villager": "村民",
-}
 _STATIC_PATTERNS: tuple[tuple[re.Pattern[str], dict[str, str], str], ...] = (
     (
         re.compile(r"^(%s) Pacifies (Endermen|Phantoms|Piglins) when worn$"),
@@ -431,6 +423,8 @@ def read_target_strings(target: TranslationTarget) -> dict[str, str]:
         return mdx.extract_mdx(read_jar_text(target.source_file, target.path_in_jar))
     elif target.format == "oracle_meta":
         return mdx.extract_meta(read_jar_text(target.source_file, target.path_in_jar))
+    elif target.format == "rct_names":
+        return rct.read_trainer_names(target)
     return {}
 
 
@@ -441,7 +435,7 @@ def read_existing_target(target: TranslationTarget, lang_code: str) -> dict[str,
         existing_path = target.existing_path_in_jar
         if not existing_path:
             return {}
-        if target.format == "json_lang":
+        if target.format in ("json_lang", "rct_names"):
             return read_jar_json_lang(target.source_file, existing_path)
         if target.format == "legacy_lang":
             return read_jar_legacy_lang(target.source_file, existing_path)
@@ -506,6 +500,9 @@ def process_target(
 
     if target.format == "oracle_meta":
         return _process_oracle_meta(target, translator, cache, retry_count, cancel_check, on_pair_done)
+
+    if target.format == "rct_names":
+        return _process_rct_names(target, translator, cache, retry_count, cancel_check, on_pair_done)
 
     if target.format == "json_lang":
         en_dict = read_json_lang(target.source_file, target.path_in_jar)
@@ -704,6 +701,82 @@ def _process_oracle_meta(
                 and read_jar_text(target.source_file, target.target_path_in_jar) == new_raw):
             write_jar_text(target.source_file, target.target_path_in_jar, new_raw)
     return n_translated, n_cached, n_fallback, failed
+
+
+def _process_rct_names(
+    target: TranslationTarget,
+    translator: Any,
+    cache: dict[str, str],
+    retry_count: int = 0,
+    cancel_check=None,
+    on_pair_done=None,
+) -> tuple[int, int, int, dict[str, str]]:
+    """rctmod 訓練家名稱：合成 trainer.rctmod.<id>.name 鍵寫入 lang 檔。
+
+    三層譯法（rct 模組）：靜態官方譯名整串命中 → 確定性、零 API；
+    職業前綴命中 → 職業確定性翻譯＋人名交模型（同名經快取全 roster 一致）；
+    皆未命中 → 整串交模型。人名段翻不動時保留英文人名（職業已翻，符合
+    任務書「冠軍 Jax」式慣例），不計失敗；整串路徑的失敗照常回報。
+    """
+    en_dict = rct.read_trainer_names(target)
+    if not en_dict:
+        return 0, 0, 0, {}
+    glossary = getattr(translator, "glossary", None)
+    zh_existing = read_existing_target(target, target.output_lang_code)
+    pending = diff_keys(en_dict, zh_existing, glossary=glossary)
+
+    result: dict[str, str] = {}
+    split_pending: dict[str, tuple[str, str]] = {}
+    whole_pending: dict[str, str] = {}
+    n_static = 0
+    for key in pending:
+        src = en_dict[key]
+        static = rct.static_name(src)
+        if static is not None:
+            result[key] = static
+            n_static += 1
+            if on_pair_done is not None:
+                on_pair_done(1)
+            continue
+        split = rct.split_class(src)
+        if split is None:
+            whole_pending[key] = src
+        elif split[1]:
+            split_pending[key] = split
+        else:
+            result[key] = split[0]
+            n_static += 1
+            if on_pair_done is not None:
+                on_pair_done(1)
+
+    # 人名段以獨立字串走標準管線（快取去重 → 同名譯法一致）；
+    # zh_existing 傳空 dict：外層 diff 已確定這些鍵缺譯。
+    given_sources = {key: given for key, (_cls, given) in split_pending.items()}
+    given_result, n_t1, n_c1, _n_f1, _failed_given = translate_dict(
+        given_sources, {}, translator, cache, retry_count, cancel_check, on_pair_done
+    )
+    for key, (class_zh, given) in split_pending.items():
+        result[key] = rct.compose(class_zh, given_result.get(key, given))
+
+    whole_result, n_t2, n_c2, n_f2, failed = translate_dict(
+        whole_pending, {}, translator, cache, retry_count, cancel_check, on_pair_done
+    )
+    result.update(whole_result)
+
+    if result:
+        write_payload = {**zh_existing, **result}
+        if target.output_mode == "jar_inject":
+            if not target.target_path_in_jar:
+                raise ValueError(f"Missing jar target path for {target.source_file}")
+            write_jar_json_lang(target.source_file, target.target_path_in_jar, write_payload)
+        else:
+            if target.target_file is None:
+                raise ValueError(f"Missing target file for {target.source_file}")
+            write_inplace_json(
+                target.source_file, target.output_lang_code, write_payload, target.target_file
+            )
+
+    return n_static + n_t1 + n_t2, n_c1 + n_c2, n_f2, failed
 
 
 def failed_target_name(target: TranslationTarget) -> str:

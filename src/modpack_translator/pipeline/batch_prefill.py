@@ -55,6 +55,7 @@ from modpack_translator.pipeline.preprocessor import (
     encode,
     is_usable_translation,
 )
+from modpack_translator.pipeline import rct
 from modpack_translator.pipeline.remote_translator import resolve_remote_settings
 from modpack_translator.pipeline.runner import (
     _HAS_LETTER_RE,
@@ -161,6 +162,14 @@ def collect_prefill_items(
             continue
         for key in diff_keys(en, zh, glossary=glossary):
             src = en[key]
+            if target.format == "rct_names":
+                # 訓練家名稱只有「會送模型的字串」需要預翻譯：靜態譯名命中者
+                # 跳過、職業前綴命中者只翻人名段——與逐檔階段送模型的字串
+                # 一致（rct.model_source），快取才互通。
+                model_src = rct.model_source(src)
+                if model_src is None:
+                    continue
+                src = model_src
             ck = cache_key(src)
             if ck in seen:
                 continue

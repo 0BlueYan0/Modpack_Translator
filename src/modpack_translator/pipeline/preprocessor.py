@@ -95,7 +95,24 @@ def _folded_punct(value: str) -> str:
     return value.translate(_PUNCT_WIDTH_FOLD)
 
 
+# 靜態譯表：整串（strip 後）命中者以固定譯文直接取代、不呼叫模型
+# （runner._static_translation）。同時作為可譯性豁免——像 "E4"（四天王）
+# 這種值樣貌像代號、會被不可譯過濾器攔下的詞，因為有確定譯文而必可譯。
+STATIC_TRANSLATIONS = {
+    "Bosses": "首領",
+    "Cat": "貓",
+    "Chicken": "雞",
+    "Cow": "牛",
+    "E4": "四天王",
+    "Pig": "豬",
+    "Sheep": "綿羊",
+    "Villager": "村民",
+}
+
+
 def _has_translatable_text(value: str) -> bool:
+    if value.strip() in STATIC_TRANSLATIONS:
+        return True
     if _is_structural_text(value):
         return False
     if _is_untranslatable_value(value):
