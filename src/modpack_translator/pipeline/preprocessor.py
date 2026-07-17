@@ -193,6 +193,7 @@ _CODE_IDENTIFIER_RE = re.compile(
     r"|%\w+%"                           # 佔位符變數：%player%
     r"|@\w+(?:\([^()]*\))?"             # 實體過濾器：@player、@animal(age=adult)
     r"|#[\w-]{2,}"                      # 頻道 / 標籤：#allthemons-techsupport
+    r"|(?<![\w/])/[a-z][a-z0-9_-]*"     # 斜線指令字面：/time、/gamerule
     r"|\b[\w.]+=\S*"                    # 設定賦值字面：items.1=any、key=value
     r"|\b\w+(?:\.\w+)+(?::\d+)?\b"      # 點分識別字：q.player、some.menu.identifier:505280
     r"|'[^'\s]+'"                       # 引號包住的無空白字面值
@@ -528,6 +529,11 @@ def _is_copy_only_key_value(key: str, value: str) -> bool:
     # 指令鍵下的單一小寫單字是指令字面值（如 create.command.killTPSCommand = "killtps"）
     if ".command" in key and re.fullmatch(r"[a-z][a-z0-9_-]{2,}", text):
         return True
+    # 連結鍵下的專案 slug（aquamirae.obscure_book.mod_link = "ob-aquamirae"）：
+    # 純小寫、以 -_. 相連的單一 token 是平台代稱/網址片段，原樣保留。
+    # 散文值（"Click here to open the link"）含空白不中，仍要翻譯。
+    if key.endswith((".link", "_link")) and re.fullmatch(r"[a-z0-9]+(?:[._-][a-z0-9]+)+", text):
+        return True
     # 指令用法文法一覽（lootr.commands.usage = "/lootr cart | cart <loot-table> | …"）：
     # 以 / 起頭且含多重 | 分隔的子指令與 <參數> 佔位，是語法非散文，模型只能原樣
     # 返回；含管線的散文不以 / 起頭、單一指令說明文無多重管線，皆不受影響。
@@ -596,6 +602,8 @@ def _is_untranslatable_value(value: str) -> bool:
         return True
     if _looks_like_color_code_art(text):
         return True
+    if _looks_like_obfuscated_text(text):
+        return True
     return False
 
 
@@ -657,6 +665,35 @@ def _looks_like_vocalization(text: str) -> bool:
     if vowels / len(letters) < 0.8:
         return False
     return bool(_VOCALIZATION_RUN_RE.search(plain))
+
+
+_FORMAT_CODE_RE = re.compile(r"[§&]([0-9A-FK-ORa-fk-or])")
+
+
+def _looks_like_obfuscated_text(text: str) -> bool:
+    """全文都在 §k 亂碼特效下的字串（paraglider anti_vessel 的彩蛋 tooltip）。
+
+    §k 在遊戲中渲染成不斷隨機跳動的亂碼字元，實際字元內容永遠不可見，
+    內容也多為鍵盤亂打（asdf…），模型輸出必然無法通過驗證。色碼與 §r
+    會重置格式（含 §k），逐段追蹤亂碼狀態；只要有任何可見文字段含字母
+    就不算，仍要翻譯。
+    """
+    if not re.search(r"[§&][Kk]", text):
+        return False
+    obfuscated = False
+    pos = 0
+    for m in _FORMAT_CODE_RE.finditer(text):
+        segment = text[pos:m.start()]
+        if not obfuscated and re.search(r"[^\W\d_]", segment):
+            return False
+        code = m.group(1).lower()
+        if code == "k":
+            obfuscated = True
+        elif code == "r" or code in "0123456789abcdef":
+            obfuscated = False
+        pos = m.end()
+    tail = text[pos:]
+    return obfuscated or not re.search(r"[^\W\d_]", tail)
 
 
 def _looks_like_color_code_art(text: str) -> bool:
@@ -760,14 +797,18 @@ def _looks_like_function_signature(text: str) -> bool:
 def _looks_like_command_usage(text: str) -> bool:
     """整串是斜線指令用法（ftbquests："/ftbquests export_rewards_to_chest <reward_table>"）。
 
-    佔位符（<arg>）以外全為小寫指令 token 且總長 ≤4 個 token 才算；
-    含大寫、撇號或較長散文的指令說明（"/home Teleports you to your Home"）
+    佔位符（<arg>）以外全為指令 token 且總長 ≤4 個 token 才算；token 須以
+    小寫開頭，camelCase 遊戲規則名（"/gamerule sendCommandFeedback true"）
+    是程式識別字也算。首字大寫的散文說明（"/home Teleports you to your Home"）
     不受影響，仍要翻譯。
     """
     plain = _PLACEHOLDERS.sub(" ", text).strip()
     if not plain.startswith("/"):
         return False
-    if not re.fullmatch(r"/[a-z][a-z0-9_:-]*(?:\s+[a-z0-9_@.\[\]|:<>-]+)*", plain):
+    if not re.fullmatch(
+        r"/[a-z][a-z0-9_:-]*(?:\s+(?:[a-z][A-Za-z0-9_@.\[\]|:<>-]*|[a-z0-9_@.\[\]|:<>-]+))*",
+        plain,
+    ):
         return False
     return len(plain.split()) <= 4
 

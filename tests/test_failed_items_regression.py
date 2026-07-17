@@ -597,3 +597,73 @@ def test_prose_with_pipes_or_slash_still_translatable():
     assert classify_translation_entry(
         "x.cmd_help", "/home teleports you to your home point."
     ) == "translate"
+
+
+# ── 6. v1.9.0 DawnCraft 實跑樣本(2026-07-17):camelCase 指令、§k 亂碼、
+#      /指令字面殘留誤殺、link 鍵 slug ──────────────────────────────────
+
+def test_camelcase_gamerule_command_is_skipped():
+    # ftbquests useful_commands_for_servers:純指令行,gamerule 名是 camelCase
+    # 識別字(sendCommandFeedback),非散文;模型只能原樣返回,必須不可譯
+    assert classify_translation_entry(
+        "61:description", "/gamerule sendCommandFeedback true"
+    ) != "translate"
+    assert classify_translation_entry(
+        "64:description", "  /gamerule doDCBossesRespawn true"
+    ) != "translate"
+
+
+def test_capitalized_command_prose_still_translates():
+    # 防過度放寬:首字大寫的散文說明(非 camelCase 識別字)仍要翻譯
+    assert classify_translation_entry(
+        "commands.mod.home.help", "/home Teleports you to your Home"
+    ) == "translate"
+
+
+def test_fully_obfuscated_gibberish_is_skipped():
+    # paraglider anti_vessel:全文都在 §k 亂碼特效下,遊戲中渲染為隨機跳動
+    # 亂碼,字元內容永遠不可見,內容也是鍵盤亂打,無可譯內容
+    assert classify_translation_entry(
+        "tooltip.paraglider.anti_vessel.1",
+        "§5§k§oasdfasdfasdfas dfasdfasdfasfd sfn §c§k§o가나다§5§k§ofdadff§r",
+    ) != "translate"
+
+
+def test_obfuscated_prefix_with_visible_prose_still_translates():
+    # 防過度放寬:§k 段之外還有可見散文時仍要翻譯
+    assert classify_translation_entry(
+        "item.mod.secret.tooltip", "§kXXX§r A mysterious fragment"
+    ) == "translate"
+
+
+def test_slash_command_reference_not_counted_as_leak():
+    # roughlyenoughitems time_command.desc:正確譯文保留 /time 指令字面,
+    # 其中的 time 是指令名而非漏翻殘留,不得誤殺正確輸出
+    src = (
+        "The command invoked to change the time. This may be useful if the "
+        "server replaced the default /time command. Available placeholders: {time}."
+    )
+    tgt = "用於更改時間的指令。若伺服器替換了預設的 /time 指令,這可能很有用。可用佔位符:{time}。"
+    assert is_usable_translation(src, tgt, accept_identical_proper_noun=True)
+
+
+def test_prose_time_leak_still_rejected():
+    # 防過度放寬:散文中未翻譯的 time(非 /指令字面)仍算漏翻殘留
+    assert not is_usable_translation(
+        "Click to change the time.", "點擊以更改 time。"
+    )
+
+
+def test_mod_link_slug_is_copied():
+    # aquamirae.obscure_book.mod_link = "ob-aquamirae":link 鍵下的
+    # 專案 slug(純小寫、-_. 相連的單一 token)原樣保留
+    assert classify_translation_entry(
+        "aquamirae.obscure_book.mod_link", "ob-aquamirae"
+    ) != "translate"
+
+
+def test_link_key_with_prose_still_translates():
+    # 防過度放寬:link 鍵下的散文值仍要翻譯
+    assert classify_translation_entry(
+        "gui.mod.open_link", "Click here to open the link"
+    ) == "translate"
