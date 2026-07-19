@@ -6,7 +6,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from modpack_translator.pipeline import mdx, rct
+from modpack_translator.pipeline import mdx, rct, vh
 from modpack_translator.pipeline.preprocessor import (
     diff_keys,
     parse_json_lang,
@@ -71,6 +71,8 @@ class ModpackScanner:
             targets.extend(self._scan_betterquesting(root, lang_code, glossary))
             targets.extend(self._scan_kubejs(root, lang_code, glossary))
             targets.extend(self._scan_rct_local(root, lang_code, glossary))
+            targets.extend(self._scan_root_patchouli_books(root, lang_code, glossary))
+            targets.extend(self._scan_vault_config(root, lang_code, glossary))
 
             return targets
         finally:
@@ -692,6 +694,130 @@ class ModpackScanner:
                 output_mode="in_place",
             ))
         return targets
+
+    # ------------------------------------------- 遊戲根目錄 Patchouli 外部書
+
+    def _scan_root_patchouli_books(self, modpack_path: Path, lang_code: str, glossary=None) -> list[TranslationTarget]:
+        """遊戲根目錄的 Patchouli 外部書（<game>/patchouli_books/<book>/<locale>/**.json，
+        如 Vault Hunters 主指南 the_vault_main_guide）。Patchouli 依遊戲語言
+        載入對應 locale 資料夾、逐檔 fallback en_us——譯頁寫入同書
+        <lang>/ 鏡像樹即原生生效。book.json 是跨語言共用檔，不在此處理。"""
+        books_dir = modpack_path / "patchouli_books"
+        if not books_dir.is_dir():
+            return []
+        targets: list[TranslationTarget] = []
+        for book_dir in sorted(p for p in books_dir.iterdir() if p.is_dir()):
+            en_dir = book_dir / "en_us"
+            if not en_dir.is_dir():
+                continue
+            write_root = book_dir / lang_code.lower()
+            existing_root = next(
+                (book_dir / cand for cand in self._locale_candidates(lang_code)
+                 if (book_dir / cand).is_dir()),
+                None,
+            )
+            for page in sorted(en_dir.rglob("*.json")):
+                if self._is_ignored_lang_path(page):
+                    continue
+                rel = page.relative_to(en_dir)
+                write_file = write_root.joinpath(rel)
+                existing_file = None
+                if existing_root is not None and existing_root.joinpath(rel).is_file():
+                    existing_file = existing_root.joinpath(rel)
+                needs = self._local_patchouli_needs_translation(page, existing_file, glossary)
+                if not (needs or self._needs_local_migration(existing_file, write_file)):
+                    continue
+                targets.append(TranslationTarget(
+                    source_file=page,
+                    path_in_jar=None,
+                    mod_id=book_dir.name,
+                    format="patchouli_json",
+                    output_mode="in_place",
+                    output_lang_code=lang_code,
+                    target_file=write_file,
+                    existing_file=existing_file,
+                ))
+        return targets
+
+    def _local_patchouli_needs_translation(
+        self, source_file: Path, existing_file: Path | None, glossary=None
+    ) -> bool:
+        if getattr(self, "_include_translated", False):
+            return True
+        try:
+            source_page = json.loads(source_file.read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return False
+        source = read_patchouli_text(source_page)
+        if not source:
+            return False
+        existing: dict[str, str] = {}
+        if existing_file is not None and existing_file.is_file():
+            try:
+                existing = read_patchouli_text(
+                    json.loads(existing_file.read_text(encoding="utf-8-sig"))
+                )
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                existing = {}
+        return bool(diff_keys(source, existing, glossary=glossary))
+
+    # --------------------------------------------- Vault Hunters config 在地化
+
+    def _scan_vault_config(self, modpack_path: Path, lang_code: str, glossary=None) -> list[TranslationTarget]:
+        """the_vault 的 config 在地化機制：GUI 描述文字（技能/能力/任務/物品
+        tooltip…）不在 lang 檔而在 config/the_vault/*.json，模組依遊戲語言
+        載入 config/the_vault/lang/<locale>/<同相對路徑> 覆蓋檔（VH 官方
+        出貨 zh_cn/de_de/… 即此機制）。來源一律用英文根檔，輸出完整結構
+        的 lang/<lang>/ 檔。"""
+        config_dir = modpack_path / "config" / "the_vault"
+        lang_root = config_dir / "lang"
+        if not lang_root.is_dir():
+            return []
+        targets: list[TranslationTarget] = []
+        for rel in vh.LOCALIZABLE_FILES:
+            source = config_dir.joinpath(*rel.split("/"))
+            if not source.is_file():
+                continue
+            write_file = lang_root.joinpath(lang_code.lower(), *rel.split("/"))
+            existing_file = next(
+                (lang_root.joinpath(cand, *rel.split("/"))
+                 for cand in self._locale_candidates(lang_code)
+                 if lang_root.joinpath(cand, *rel.split("/")).is_file()),
+                None,
+            )
+            needs = self._vault_config_needs_translation(source, existing_file, rel, glossary)
+            if not (needs or self._needs_local_migration(existing_file, write_file)):
+                continue
+            targets.append(TranslationTarget(
+                source_file=source,
+                path_in_jar=None,
+                mod_id="the_vault",
+                format="vh_config_json",
+                output_mode="in_place",
+                output_lang_code=lang_code,
+                target_file=write_file,
+                existing_file=existing_file,
+            ))
+        return targets
+
+    def _vault_config_needs_translation(
+        self, source_file: Path, existing_file: Path | None, rel: str, glossary=None
+    ) -> bool:
+        if getattr(self, "_include_translated", False):
+            return True
+        try:
+            source = vh.read_config_text(source_file, rel)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return False
+        if not source:
+            return False
+        existing: dict[str, str] = {}
+        if existing_file is not None and existing_file.is_file():
+            try:
+                existing = vh.read_config_text(existing_file, rel)
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                existing = {}
+        return bool(diff_keys(source, existing, glossary=glossary))
 
     # --------------------------------------------------------------- FTB Quests
 

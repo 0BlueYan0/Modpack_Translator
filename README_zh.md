@@ -283,6 +283,8 @@ uv run python scripts/translate_modpack.py --modpack "C:/CurseForge/Instances/AT
 | `oracle_mdx` / `oracle_meta` | `.mdx` / `.json` | Oracle Index 指南書內文（oritech 等） |
 | `guideme_md` | `.md` | GuideME 指南頁（AE2 按 G 指南等） |
 | `rct_names` | `.json` | Radical Cobblemon Trainers 訓練家名稱（世界名牌／訓練家卡） |
+| `patchouli_json`（外部書） | `.json` | 遊戲根目錄 `patchouli_books/<書>/<locale>/` 的外部導覽書（Vault Hunters 主指南等） |
+| `vh_config_json` | `.json` | Vault Hunters（the_vault）config 在地化：技能／能力／任務／物品 tooltip 等 GUI 文字（`config/the_vault/lang/<locale>/`） |
 
 ---
 

@@ -7,7 +7,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from modpack_translator.pipeline import mdx, rct
+from modpack_translator.pipeline import mdx, rct, vh
 from modpack_translator.pipeline.patcher import (
     read_jar_json_file,
     read_jar_json_lang,
@@ -403,14 +403,38 @@ def translate_dict(
     return result, n_translated, n_cached, n_fallback, failed
 
 
+def _read_patchouli_source(target: TranslationTarget) -> dict[str, Any]:
+    """Patchouli 來源頁：jar 內頁走 zip 讀取；遊戲根目錄外部書直接讀本地檔。"""
+    if target.path_in_jar:
+        return read_patchouli_page(target.source_file, target.path_in_jar)
+    data = json.loads(target.source_file.read_text(encoding="utf-8-sig"))
+    return data if isinstance(data, dict) else {}
+
+
+def _read_local_json_dict(path: Path | None) -> dict[str, Any]:
+    if path is None or not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_local_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def read_target_strings(target: TranslationTarget) -> dict[str, str]:
     if target.format == "json_lang":
         return read_json_lang(target.source_file, target.path_in_jar)
     elif target.format == "legacy_lang":
         return read_legacy_lang(target.source_file, target.path_in_jar)
     elif target.format == "patchouli_json":
-        page = read_patchouli_page(target.source_file, target.path_in_jar)
-        return read_patchouli_text(page)
+        return read_patchouli_text(_read_patchouli_source(target))
+    elif target.format == "vh_config_json":
+        return vh.read_source_text(target.source_file)
     elif target.format in ("ftbq_snbt", "heracles_snbt"):
         return read_snbt_lang(target.source_file)
     elif target.format in ("ftbq_inline_snbt", "heracles_inline_snbt"):
@@ -465,6 +489,14 @@ def read_existing_target(target: TranslationTarget, lang_code: str) -> dict[str,
         return {}
     elif target.format == "bq_lang":
         return read_existing_bq_lang(existing_file) if existing_file else {}
+    elif target.format == "patchouli_json":
+        return read_patchouli_text(_read_local_json_dict(existing_file))
+    elif target.format == "vh_config_json":
+        existing_data = _read_local_json_dict(existing_file)
+        if not existing_data:
+            return {}
+        found = vh.spec_for_source(existing_file) or vh.spec_for_source(target.source_file)
+        return vh.extract_text(existing_data, found[1]) if found else {}
     else:
         if existing_file and existing_file.exists():
             return json.loads(existing_file.read_text(encoding="utf-8"))
@@ -503,6 +535,9 @@ def process_target(
 
     if target.format == "rct_names":
         return _process_rct_names(target, translator, cache, retry_count, cancel_check, on_pair_done)
+
+    if target.format == "vh_config_json":
+        return _process_vh_config(target, translator, cache, retry_count, cancel_check, on_pair_done)
 
     if target.format == "json_lang":
         en_dict = read_json_lang(target.source_file, target.path_in_jar)
@@ -564,21 +599,22 @@ def _process_patchouli(
     cancel_check=None,
     on_pair_done=None,
 ) -> tuple[int, int, int, dict[str, str]]:
-    if not target.path_in_jar:
-        raise ValueError(f"Missing Patchouli source path for {target.source_file}")
+    if target.output_mode == "jar_inject":
+        if not target.path_in_jar:
+            raise ValueError(f"Missing Patchouli source path for {target.source_file}")
+        target_path = target.target_path_in_jar or target.path_in_jar
+        # 既有譯頁可能在大寫語系目錄;讀 existing_path 供重用/diff,寫入一律正規小寫 target_path。
+        existing_page = read_jar_json_file(target.source_file, target.existing_path_in_jar)
+    else:
+        # 遊戲根目錄外部書（in_place）：來源/既有/寫入都是本地檔
+        if target.target_file is None:
+            raise ValueError(f"Missing Patchouli target file for {target.source_file}")
+        target_path = None
+        existing_page = _read_local_json_dict(target.existing_file)
 
     glossary = getattr(translator, "glossary", None)
     pack_context = getattr(translator, "pack_context", None)
-    source_page = read_patchouli_page(target.source_file, target.path_in_jar)
-    target_path = target.target_path_in_jar or target.path_in_jar
-    if not target_path:
-        raise ValueError(f"Missing Patchouli target path for {target.source_file}")
-    # 既有譯頁可能在大寫語系目錄;讀 existing_path 供重用/diff,寫入一律正規小寫 target_path。
-    existing_page = (
-        read_jar_json_file(target.source_file, target.existing_path_in_jar)
-        if target.output_mode == "jar_inject"
-        else {}
-    )
+    source_page = _read_patchouli_source(target)
     page = deepcopy(source_page)
     source_strings = read_patchouli_text(source_page)
     existing_strings = read_patchouli_text(existing_page) if existing_page else {}
@@ -636,11 +672,100 @@ def _process_patchouli(
             on_pair_done(1)
 
     # 純遷移:既有譯頁在大寫目錄、正規小寫目錄尚不存在時,即使 page 未變也要建立小寫檔。
-    target_missing = target.output_mode == "jar_inject" and not jar_member_exists(target.source_file, target_path)
-    if changed or (target_missing and bool(existing_page)):
-        if target.output_mode != "jar_inject":
-            raise ValueError("Patchouli resource pack output is no longer supported")
-        write_jar_json_file(target.source_file, target_path, page)
+    if target.output_mode == "jar_inject":
+        target_missing = not jar_member_exists(target.source_file, target_path)
+        if changed or (target_missing and bool(existing_page)):
+            write_jar_json_file(target.source_file, target_path, page)
+    else:
+        target_missing = not target.target_file.exists()
+        if changed or (target_missing and bool(existing_page)):
+            _write_local_json(target.target_file, page)
+
+    return n_translated, n_cached, n_fallback, failed
+
+
+def _process_vh_config(
+    target: TranslationTarget,
+    translator: Any,
+    cache: dict[str, str],
+    retry_count: int = 0,
+    cancel_check=None,
+    on_pair_done=None,
+) -> tuple[int, int, int, dict[str, str]]:
+    """the_vault config 在地化檔：讀英文根檔 → 以 JSON path 抽字串 → 翻譯 →
+    寫出完整結構的 config/the_vault/lang/<locale>/ 覆蓋檔（以來源打底，
+    僅譯文欄位被替換；id/color 等結構欄位原樣保留）。"""
+    found = vh.spec_for_source(target.source_file)
+    if found is None:
+        return 0, 0, 0, {}
+    _rel, spec = found
+    if target.target_file is None:
+        raise ValueError(f"Missing target file for {target.source_file}")
+
+    glossary = getattr(translator, "glossary", None)
+    pack_context = getattr(translator, "pack_context", None)
+    source_data = vh.read_config_json(target.source_file)
+    data = deepcopy(source_data)
+    source_strings = vh.extract_text(source_data, spec)
+    existing_data = _read_local_json_dict(target.existing_file)
+    existing_strings = vh.extract_text(existing_data, spec) if existing_data else {}
+    # 既有譯文（可能來自上一輪或大寫語系目錄）可用者先套回，僅補譯 diff
+    for path_key, existing_value in existing_strings.items():
+        source_value = source_strings.get(path_key)
+        if source_value is None:
+            continue
+        if not is_usable_translation(source_value, existing_value, glossary=glossary):
+            continue
+        ck = cache_key(source_value)
+        if cache.get(ck) == existing_value:
+            enforced = _enforce_glossary(glossary, source_value, existing_value)
+            if enforced != existing_value:
+                cache[ck] = enforced
+                existing_value = enforced
+        vh.apply_text(data, path_key, existing_value)
+
+    current_strings = vh.extract_text(data, spec)
+    to_translate = diff_keys(source_strings, current_strings, glossary=glossary)
+
+    changed = data != existing_data
+    failed: dict[str, str] = {}
+    n_translated = n_cached = n_fallback = 0
+
+    for path_key in to_translate:
+        if cancel_check is not None and cancel_check():
+            break
+        src = source_strings[path_key]
+        ck = cache_key(src)
+        if ck in cache and is_usable_translation(
+            src, cache[ck], accept_identical_proper_noun=True, glossary=glossary
+        ):
+            value = _enforce_glossary(glossary, src, cache[ck])
+            if value != cache[ck]:
+                cache[ck] = value
+            vh.apply_text(data, path_key, value)
+            changed = True
+            n_cached += 1
+            if on_pair_done is not None:
+                on_pair_done(1)
+            continue
+        cache.pop(ck, None)
+        final, ok = _translate_segmented_text(translator, src, retry_count, cancel_check)
+        if ok:
+            vh.apply_text(data, path_key, final)
+            cache[ck] = final
+            changed = True
+            n_translated += 1
+            if pack_context is not None:
+                pack_context.maybe_record(src, final, glossary)
+        else:
+            failed[path_key] = src
+            n_fallback += 1
+        if on_pair_done is not None:
+            on_pair_done(1)
+
+    target_missing = not target.target_file.exists()
+    if changed or (target_missing and bool(existing_data)):
+        _write_local_json(target.target_file, data)
 
     return n_translated, n_cached, n_fallback, failed
 

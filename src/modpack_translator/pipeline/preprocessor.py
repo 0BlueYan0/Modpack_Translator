@@ -509,6 +509,11 @@ def _is_copy_only_key_value(key: str, value: str) -> bool:
     lowered = text.lower()
     if lowered in _COPY_ONLY_VALUES:
         return True
+    # 「作者 - 標題」署名只在署名語境的鍵下原樣保留（quest_desc、*.desc、
+    # music/disc/painting/sound…）。block.*、screen.* 等遊戲物件與 GUI 鍵
+    # 的「Name - Variant」值是顯示名稱，不受此規則影響，照常翻譯。
+    if _is_credit_context_key(key) and _looks_like_credit(text):
+        return True
     if key.startswith("mod_menu.") and (
         ".badge." in key
         or key.endswith((
@@ -583,8 +588,6 @@ def _is_untranslatable_value(value: str) -> bool:
     if _is_short_grammar_fragment(text):
         return True
     if _is_keybind_or_shortcut(text):
-        return True
-    if _looks_like_credit(text):
         return True
     if _looks_like_code_or_table_line(text):
         return True
@@ -751,6 +754,25 @@ def _is_keybind_or_shortcut(text: str) -> bool:
     return False
 
 
+# 署名可能出現的鍵語境：音樂/唱片/畫作/音效說明與任務描述。值形署名
+# （"Name - Title"）只在這些鍵下才視為署名跳過——「Name - Variant」是
+# 方塊/物品名的常見樣式（the_vault "Alexandrite Ore - Stone"、neoncraft2
+# "Letter A Neon - White"），「LABEL - explanation」是 GUI tooltip 樣式
+# （the_vault "LOCKED - Click on toggle button…"），不帶鍵語境就把含
+# " - " 的值當署名會整批誤殺玩家看得到的文字。
+_CREDIT_KEY_HINT_RE = re.compile(
+    r"(?:^|[._-])"
+    r"(?:quest_desc|subtitles?|descriptions?|desc|music|discs?|paintings?"
+    r"|sounds?|records?|credits?|authors?)"
+    r"(?:$|[._\[-])",
+    re.IGNORECASE,
+)
+
+
+def _is_credit_context_key(key: str) -> bool:
+    return bool(_CREDIT_KEY_HINT_RE.search(key))
+
+
 def _looks_like_credit(text: str) -> bool:
     if " - " not in text:
         return False
@@ -763,7 +785,13 @@ def _looks_like_credit(text: str) -> bool:
     # 真正的「作者 - 標題」署名左半是短名稱（Direwolf20、AllTheMods）。破折號
     # 敘事句左半是整個子句（"Team Rocket's masterwork sits in the heart of the
     # volcano"），字數多，不算署名——否則整段描述會被誤判不可譯而跳過。
-    return len(re.findall(r"\S+", left)) <= 4
+    if len(re.findall(r"\S+", left)) > 4:
+        return False
+    # 右半是短標題（Thime、Modpack Author）才算署名；小寫起頭或整句解說
+    # （"goes up with every revive…"）是散文，仍要翻譯。
+    if not re.fullmatch(r"[A-Z][A-Za-z0-9' ._-]*", right):
+        return False
+    return len(re.findall(r"\S+", right)) <= 5
 
 
 _FUNC_SIGNATURE_ARG_RE = re.compile(
@@ -881,10 +909,11 @@ def _is_translation_required_word(word: str) -> bool:
         return False
     if normalized.lower() in _TRANSLATION_OPTIONAL_WORDS:
         return False
-    if normalized.isupper():
-        return False
-    if re.fullmatch(r"[A-Z0-9]+s?", normalized):
-        return False
+    if normalized.isupper() or re.fullmatch(r"[A-Z0-9]+s?", normalized):
+        # 全大寫預設是縮寫（CPU、NBT、HTTPS）不可譯；但長度 ≥5 且含母音的
+        # 全大寫 token 是被大寫排版的真單字（DOWNED、BROKEN、ROLLIN'——
+        # the_vault 倒地標題、裝備損壞 tooltip、成就標題），仍要翻譯。
+        return len(normalized) >= 5 and any(ch in "AEIOUY" for ch in normalized.upper())
     if re.search(r"[a-z][A-Z]", normalized):
         return False
     return bool(re.search(r"[a-z]", normalized))

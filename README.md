@@ -285,6 +285,8 @@ uv run python scripts/translate_modpack.py --modpack "C:/CurseForge/Instances/AT
 | `oracle_mdx` / `oracle_meta` | `.mdx` / `.json` | Oracle Index guidebook pages (oritech etc.) |
 | `guideme_md` | `.md` | GuideME guide pages (AE2 in-game guide etc.) |
 | `rct_names` | `.json` | Radical Cobblemon Trainers trainer names (nameplates / trainer card) |
+| `patchouli_json` (external books) | `.json` | External Patchouli books under game-root `patchouli_books/<book>/<locale>/` (Vault Hunters main guide etc.) |
+| `vh_config_json` | `.json` | Vault Hunters (the_vault) config localization: skill/ability/quest/item-tooltip GUI text (`config/the_vault/lang/<locale>/`) |
 
 ---
 
