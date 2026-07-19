@@ -94,6 +94,16 @@ def test_on_off_ok_static_translations():
     assert is_usable_translation("ON", "開啟")
 
 
+def test_repeated_acronym_units_still_skipped():
+    """Draconic Evolution "%sOP @%s OP/t" 實跑失敗回歸:同一含母音縮寫
+    (OP=能量單位)重複出現不得湊成「≥2 個大寫詞」的片語——片語規則計
+    相異詞數;真正的大寫句子(I SAID DART GUN!)用詞相異,不受影響。"""
+    assert classify_translation_entry(
+        "module.draconicevolution.undying.energy.value", "%sOP @%s OP/t"
+    ) != "translate"
+    assert classify_translation_entry("some.key", "%s OP / %s OP") != "translate"
+
+
 def test_true_acronyms_still_skipped():
     assert classify_translation_entry("gui.ae2.units.rf", "RF") != "translate"
     assert classify_translation_entry("block.caverns_and_chasms.tmt", "TMT") != "translate"

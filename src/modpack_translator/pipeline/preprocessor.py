@@ -982,15 +982,17 @@ def _requires_visible_translation(source: str) -> bool:
     words = re.findall(r"[A-Za-z][A-Za-z'-]*", text)
     if any(_is_translation_required_word(word) for word in words):
         return True
-    # 全大寫片語("I SAID DART GUN!"、"[GO UP]"):≥2 個含母音的全大寫詞是
-    # 被大寫排版的句子/標籤,不是縮寫堆;無母音對(BL SL)與已知單位/選譯
-    # 縮寫(FE、AE、XP…——"2 FE = 1 AE (Forge)" 是換算式)不計入。
-    caps_words = [
+    # 全大寫片語("I SAID DART GUN!"、"[GO UP]"):≥2 個「相異」含母音全大寫
+    # 詞是被大寫排版的句子/標籤,不是縮寫堆。無母音對(BL SL)與已知單位/
+    # 選譯縮寫(FE、AE、XP…——"2 FE = 1 AE (Forge)" 是換算式)不計入;
+    # 同一縮寫重複(draconicevolution "%sOP @%s OP/t" 的能量單位 OP)是
+    # 單位/模板重複,計相異詞才不會湊成片語。
+    caps_words = {
         w for w in words
         if len(w) >= 2 and w.isupper() and any(ch in "AEIOUY" for ch in w)
         and w.lower() not in _TRANSLATION_OPTIONAL_WORDS
         and w.lower() not in _UNIT_WORDS
-    ]
+    }
     return len(caps_words) >= 2
 
 
