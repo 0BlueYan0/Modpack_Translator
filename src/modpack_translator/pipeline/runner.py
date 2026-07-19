@@ -441,8 +441,10 @@ def read_target_strings(target: TranslationTarget) -> dict[str, str]:
         return read_inline_snbt_text(target.source_file)
     elif target.format == "bq_lang":
         return read_bq_lang(target.source_file)
-    elif target.format == "kubejs_json":
+    elif target.format in ("kubejs_json", "pack_json_lang"):
         return read_json_lang(target.source_file, None)
+    elif target.format == "pack_legacy_lang":
+        return read_legacy_lang(target.source_file, None)
     elif target.format in ("oracle_mdx", "guideme_md"):
         return mdx.extract_mdx(read_jar_text(target.source_file, target.path_in_jar))
     elif target.format == "oracle_meta":
@@ -487,7 +489,7 @@ def read_existing_target(target: TranslationTarget, lang_code: str) -> dict[str,
         return read_existing_snbt(existing_file) if existing_file else {}
     elif target.format in ("ftbq_inline_snbt", "heracles_inline_snbt"):
         return {}
-    elif target.format == "bq_lang":
+    elif target.format in ("bq_lang", "pack_legacy_lang"):
         return read_existing_bq_lang(existing_file) if existing_file else {}
     elif target.format == "patchouli_json":
         return read_patchouli_text(_read_local_json_dict(existing_file))
@@ -547,9 +549,9 @@ def process_target(
         en_dict = read_snbt_lang(target.source_file)
     elif target.format in ("ftbq_inline_snbt", "heracles_inline_snbt"):
         en_dict = read_inline_snbt_text(target.source_file)
-    elif target.format == "bq_lang":
+    elif target.format in ("bq_lang", "pack_legacy_lang"):
         en_dict = read_bq_lang(target.source_file)
-    elif target.format == "kubejs_json":
+    elif target.format in ("kubejs_json", "pack_json_lang"):
         en_dict = read_json_lang(target.source_file, None)
     else:
         return 0, 0, 0, {}
@@ -583,7 +585,7 @@ def process_target(
             write_inplace_snbt(target.source_file, lang_code, write_payload, target.target_file)
         elif target.format in ("ftbq_inline_snbt", "heracles_inline_snbt"):
             write_inline_snbt(target.source_file, result)
-        elif target.format == "bq_lang":
+        elif target.format in ("bq_lang", "pack_legacy_lang"):
             write_inplace_bq_lang(target.source_file, lang_code, write_payload, target.target_file)
         else:
             write_inplace_json(target.source_file, lang_code, write_payload, target.target_file)

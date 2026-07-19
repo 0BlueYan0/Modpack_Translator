@@ -478,6 +478,10 @@ def classify_translation_entry(key: str, value: str) -> str:
 
 
 def _is_metadata_key(key: str) -> bool:
+    # 語言檔自述中繼鍵（覆蓋原版 lang 的資源包會帶著）：值是 "English"/"en_us"
+    # 這類語言身分描述，不是顯示文字，原樣保留
+    if key in ("language.name", "language.region", "language.code"):
+        return True
     if key.endswith(".author") or ".author." in key:
         return True
     # 作者署名（holiday.mekanism.signature = "-aidancbrady"）原樣保留
@@ -964,8 +968,109 @@ def diff_keys(
 # ------------------------------------------------------------------ readers
 
 def parse_json_lang(raw: str) -> dict[str, str]:
-    data = json.loads(raw)
+    """解析 lang JSON。遊戲以 GSON lenient 讀 lang 檔，// 註解、尾逗號、
+    \\' 這類非法跳脫都讀得動（ba_bt、libertyvillagers 實際出貨如此）；
+    嚴格解析失敗就修復後重試，否則整個 mod 會被靜默跳過不翻。"""
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        data = json.loads(_lenient_json_repair(raw))
+    if not isinstance(data, dict):
+        return {}
     return {k: v for k, v in data.items() if isinstance(v, str)}
+
+
+_VALID_JSON_ESCAPES = '"\\/bfnrtu'
+
+
+def _lenient_json_repair(raw: str) -> str:
+    """把 GSON lenient 接受的寫法修成嚴格 JSON：字串外去 //、/* */ 註解與
+    尾逗號；字串內的非法跳脫（\\'）去掉反斜線。單一逐字元掃描，字串邊界
+    以未跳脫的雙引號判定，內容一律原樣保留。"""
+    out: list[str] = []
+    i, n = 0, len(raw)
+    in_str = False
+    while i < n:
+        ch = raw[i]
+        if in_str:
+            if ch == "\\":
+                nxt = raw[i + 1] if i + 1 < n else ""
+                if nxt in _VALID_JSON_ESCAPES:
+                    out.append(ch)
+                    out.append(nxt)
+                else:
+                    out.append(nxt)  # GSON lenient：非法跳脫視為字元本身
+                i += 2
+                continue
+            if ch == '"':
+                in_str = False
+            out.append(ch)
+            i += 1
+            continue
+        if ch == '"':
+            in_str = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and raw[i + 1] == "/":
+            while i < n and raw[i] not in "\r\n":
+                i += 1
+            continue
+        if ch == "/" and i + 1 < n and raw[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (raw[i] == "*" and raw[i + 1] == "/"):
+                i += 1
+            i += 2
+            continue
+        if ch == ",":
+            j = i + 1
+            while j < n and raw[j] in " \t\r\n":
+                j += 1
+            # 尾逗號：, 之後（含跨越註解）直接是 } 或 ]
+            if j < n and raw[j] in "}]":
+                i += 1
+                continue
+            if j + 1 < n and raw[j] == "/" and raw[j + 1] in "/*":
+                # , 與 } 之間隔著註解的少見情況：先保留逗號，靠第二輪修復
+                pass
+        out.append(ch)
+        i += 1
+    cleaned = "".join(out)
+    # 註解移除後可能新暴露的尾逗號（", // note\n}"）：字串外再掃一輪
+    return _strip_trailing_commas(cleaned)
+
+
+def _strip_trailing_commas(raw: str) -> str:
+    out: list[str] = []
+    i, n = 0, len(raw)
+    in_str = False
+    while i < n:
+        ch = raw[i]
+        if in_str:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(raw[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                in_str = False
+            i += 1
+            continue
+        if ch == '"':
+            in_str = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == ",":
+            j = i + 1
+            while j < n and raw[j] in " \t\r\n":
+                j += 1
+            if j < n and raw[j] in "}]":
+                i += 1
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def parse_legacy_lang(raw: str) -> dict[str, str]:

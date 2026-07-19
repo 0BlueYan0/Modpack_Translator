@@ -22,7 +22,7 @@ class TranslationTarget:
     source_file: Path
     path_in_jar: str | None
     mod_id: str
-    format: str       # json_lang | legacy_lang | patchouli_json | ftbq_snbt | ftbq_inline_snbt | heracles_snbt | heracles_inline_snbt | bq_lang | kubejs_json | oracle_mdx | oracle_meta | guideme_md | rct_names
+    format: str       # json_lang | legacy_lang | patchouli_json | ftbq_snbt | ftbq_inline_snbt | heracles_snbt | heracles_inline_snbt | bq_lang | kubejs_json | pack_json_lang | pack_legacy_lang | oracle_mdx | oracle_meta | guideme_md | rct_names
     output_mode: str  # jar_inject | in_place
     output_lang_code: str = "zh_tw"
     target_path_in_jar: str | None = None      # 寫入目標:一律正規小寫（遊戲讀得到）
@@ -66,6 +66,7 @@ class ModpackScanner:
                 for jar in sorted(mods_dir.glob("*.jar")):
                     targets.extend(self._scan_jar(jar, lang_code, glossary))
 
+            targets.extend(self._scan_resource_packs(root, lang_code, glossary))
             targets.extend(self._scan_ftbquests(root, lang_code, glossary))
             targets.extend(self._scan_heracles(root, lang_code, glossary))
             targets.extend(self._scan_betterquesting(root, lang_code, glossary))
@@ -112,7 +113,10 @@ class ModpackScanner:
 
                     elif (
                         len(parts) >= 3
-                        and parts[0] == "assets"
+                        # Patchouli 1.18+ 書內容在 data/<ns>/patchouli_books/（datapack 側，
+                        # 如 Apotheosis chronicle）,舊式在 assets 側;兩側 locale 目錄
+                        # 佈局相同,譯頁同樣寫 <book>/zh_tw/ 鏡像樹
+                        and parts[0] in ("assets", "data")
                         and "patchouli_books" in parts
                         and name.endswith(".json")
                         and not name.endswith("/")
@@ -692,6 +696,61 @@ class ModpackScanner:
                 mod_id=mod_id,
                 format=fmt,
                 output_mode="in_place",
+            ))
+        return targets
+
+    # --------------------------------------------------- 資源包（zip / 資料夾）
+
+    # zip/資料夾包的所在目錄：原版 resourcepacks/、Global Packs、OpenLoader、Paxi
+    _PACK_BASE_SUBDIRS = (
+        ("resourcepacks",),
+        ("global_packs", "required_resources"),
+        ("config", "openloader", "resources"),
+        ("config", "paxi", "resourcepacks"),
+    )
+
+    def _scan_resource_packs(self, modpack_path: Path, lang_code: str, glossary=None) -> list[TranslationTarget]:
+        """外掛資源包。modpack 慣以資源包覆蓋/新增 GUI 文字（DawnCraft:
+        quest_giver 公會任務、paraglider 女神像對話、scattered_weapons 物品名
+        都只存在 DawnCraft_Resources.zip 的 en_us.json）——這些鍵 mod jar 裡
+        沒有,不掃資源包就永遠顯示英文。zip 包結構同 mod jar,直接重用
+        _scan_jar 把 zh_tw 寫回包內（語言檔跨資源包逐鍵合併,且資源包優先
+        於 mod 內建資源,包內自訂文字的譯文蓋得過 jar 譯文）;資料夾包走
+        in_place 寫檔。config/<mod>/pack.mcmeta 的執行期資料夾包
+        （DC-Classes 職業 GUI）一併涵蓋。"""
+        targets: list[TranslationTarget] = []
+        for rel in self._PACK_BASE_SUBDIRS:
+            base = modpack_path.joinpath(*rel)
+            if not base.is_dir():
+                continue
+            for child in sorted(base.iterdir()):
+                if child.is_file() and child.suffix.lower() == ".zip":
+                    targets.extend(self._scan_jar(child, lang_code, glossary))
+                elif child.is_dir() and (child / "pack.mcmeta").is_file():
+                    targets.extend(self._scan_folder_pack(child, lang_code, glossary))
+        config_dir = modpack_path / "config"
+        if config_dir.is_dir():
+            for child in sorted(config_dir.iterdir()):
+                if child.is_dir() and (child / "pack.mcmeta").is_file():
+                    targets.extend(self._scan_folder_pack(child, lang_code, glossary))
+        return targets
+
+    def _scan_folder_pack(self, pack_dir: Path, lang_code: str, glossary=None) -> list[TranslationTarget]:
+        """資料夾型資源包的 lang 檔（resourcepacks/<dir>、config/dcclasses 等）。
+        譯檔寫在同 lang 資料夾（zh_tw.json / zh_tw.lang）,遊戲原生逐鍵合併。"""
+        assets_dir = pack_dir / "assets"
+        if not assets_dir.is_dir():
+            return []
+        targets: list[TranslationTarget] = []
+        for lang_dir in sorted(assets_dir.glob("*/lang")):
+            if not lang_dir.is_dir():
+                continue
+            namespace = lang_dir.parent.name
+            targets.extend(self._scan_lang_files(
+                lang_dir, namespace, "pack_json_lang", ".json", parse_json_lang, lang_code, glossary
+            ))
+            targets.extend(self._scan_lang_files(
+                lang_dir, namespace, "pack_legacy_lang", ".lang", parse_legacy_lang, lang_code, glossary
             ))
         return targets
 

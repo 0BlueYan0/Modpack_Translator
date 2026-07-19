@@ -13,6 +13,7 @@ from modpack_translator.pipeline.batch_prefill import prefill_translation_cache
 from modpack_translator.pipeline.glossary import Glossary, load_merged_glossary
 from modpack_translator.pipeline.patcher import (
     backup_mods,
+    backup_pack_sources,
     backup_quest_configs,
     patch_modonomicon_unicode_fonts,
 )
@@ -180,6 +181,9 @@ class TranslateWorker(QThread):
             if any(t.output_mode == "in_place" for t in self._targets):
                 backed_up = backup_quest_configs(game_root)
                 self.log.emit(f"已備份 {backed_up} 個任務/設定資料夾至 quests_bak/")
+            backed_up_packs = backup_pack_sources(game_root, self._targets)
+            if backed_up_packs:
+                self.log.emit(f"已備份 {backed_up_packs} 個資源包來源至 packs_bak/")
 
             # 每包語境：extra_prompt 併入 system prompt 靜態段（cache 友善：
             # [Glossary] 動態區塊永遠在其後），learned_terms 供動態注入

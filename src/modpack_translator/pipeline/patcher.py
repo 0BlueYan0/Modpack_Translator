@@ -93,6 +93,45 @@ def backup_quest_configs(game_root: Path) -> int:
     return count
 
 
+def backup_pack_sources(game_root: Path, targets) -> int:
+    """資源包寫入前備份到 packs_bak/（鏡像遊戲根目錄相對路徑,每來源一次）。
+
+    zip 包（resourcepacks/*.zip 等,jar_inject 但不在 mods/ 下——mods 已由
+    backup_mods 涵蓋）整檔複製;資料夾包只備份將被寫入的 lang 目錄,
+    材質等大檔不動。"""
+    backup_root = game_root / "packs_bak"
+    seen: set[Path] = set()
+    count = 0
+    for target in targets:
+        copy_dir = False
+        if target.output_mode == "jar_inject":
+            source = Path(target.source_file)
+            if source.parent == game_root / "mods":
+                continue
+        elif target.format in ("pack_json_lang", "pack_legacy_lang"):
+            source = Path(target.source_file).parent
+            copy_dir = True
+        else:
+            continue
+        try:
+            rel = source.relative_to(game_root)
+        except ValueError:
+            continue
+        if source in seen:
+            continue
+        seen.add(source)
+        destination = backup_root / rel
+        if destination.exists():
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if copy_dir:
+            shutil.copytree(source, destination)
+        else:
+            shutil.copy2(source, destination)
+        count += 1
+    return count
+
+
 def patch_modonomicon_unicode_fonts(game_root: Path) -> int:
     """Wire Modonomicon's empty unifont include to Minecraft's CJK-capable unifont."""
     mods_dir = game_root / "mods"
