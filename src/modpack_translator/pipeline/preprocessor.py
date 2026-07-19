@@ -43,9 +43,10 @@ _PLACEHOLDERS = re.compile(
     r'|\S*\{[^\s}]*\{\S*'
     r'|\{[^{}]+\}'                          # existing curly-brace placeholders
 )
+# 資源位置/路徑依 MC 規格僅小寫;大小寫混合的「Add/Edit」「World/Server」
+# 是 GUI 標籤(xaero 地圖全家),不是結構值,不得整殺
 _STRUCTURAL_TEXT_RE = re.compile(
     r"^[a-z0-9_.-]+(?::|/)[a-z0-9_./-]+(?:#[a-z0-9_./-]+)?$",
-    re.IGNORECASE,
 )
 # Bare RGB/ARGB hex color, optional leading '#': 3, 4, 6 or 8 hex digits.
 _HEX_COLOR_RE = re.compile(r"#?(?:[0-9A-Fa-f]{8}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{4}|[0-9A-Fa-f]{3})")
@@ -107,6 +108,13 @@ STATIC_TRANSLATIONS = {
     "Pig": "豬",
     "Sheep": "綿羊",
     "Villager": "村民",
+    # 全大寫切換/確認狀態詞(xaero_pac_ui_on/off、fancymenu OK 鈕…):
+    # 過去被 <5 字母全大寫=縮寫規則跳過而永遠英文;確定性譯名、零 API
+    "OK": "確定",
+    "ON": "開啟",
+    "OFF": "關閉",
+    "YES": "是",
+    "NO": "否",
 }
 
 
@@ -164,6 +172,11 @@ def is_usable_translation(
         return False
     needs_visible_translation = _requires_visible_translation(source)
     if dst == src or _folded_punct(dst) == _folded_punct(src):
+        # 靜態譯表守門：命中靜態表的原樣返回(既有 zh 檔留著 "ON"/"OFF")
+        # 不放行,讓該鍵進 diff 以靜態譯名補上(零 API 成本)。先於
+        # needs_visible 檢查——靜態詞多為 2-4 字母大寫,不被母音規則涵蓋。
+        if src.strip() in STATIC_TRANSLATIONS:
+            return False
         if not needs_visible_translation:
             return True
         # 用語庫守門：整串命中用語庫的原樣返回一律不放行——凌駕下方的
@@ -442,6 +455,9 @@ def _is_structural_text(value: str) -> bool:
     text = value.strip()
     if not text:
         return False
+    # 方括號包住的純字母詞是 GUI 標籤（xaero "[ACCEPT]"、" [Add]"），不是資料
+    if re.fullmatch(r"\[[A-Za-z]+\]", text):
+        return False
     if text.startswith(("{", "[")):
         try:
             return isinstance(json.loads(text), (dict, list))
@@ -591,7 +607,7 @@ def _is_untranslatable_value(value: str) -> bool:
         return True
     if _is_short_grammar_fragment(text):
         return True
-    if _is_keybind_or_shortcut(text):
+    if _is_keybind_chord(text):
         return True
     if _looks_like_code_or_table_line(text):
         return True
@@ -776,6 +792,30 @@ def _is_keybind_or_shortcut(text: str) -> bool:
     return False
 
 
+# 不會是一般英文單字的按鍵 token;delete/enter/shift/command/tab 等
+# 同時是常用 GUI 詞,只憑值不能斷定是按鍵(gui.xaero_delete = "Delete"
+# 是刪除按鈕),需要鍵語境(_is_keybind_key)或和弦語境才能跳過。
+_KEYBIND_UNAMBIGUOUS_WORDS = {
+    "alt", "cmd", "ctrl", "meta", "r-click",
+    *(f"f{i}" for i in range(1, 13)),
+}
+
+
+def _is_keybind_chord(text: str) -> bool:
+    """無鍵語境的值層按鍵判定:純單字符片段("%s x %s"、"N")或含明確按鍵
+    token 的和弦("CTRL + ALT + D"、"Ctrl Shift %s")才算;單獨的
+    "Delete"/"Command"/"Tab" 是 GUI 標籤,仍要翻譯。"""
+    simplified = re.sub(r"[_+/,|()-]+", " ", text.lower())
+    words = re.findall(r"[a-z0-9-]+", simplified)
+    if not words:
+        return False
+    if all(re.fullmatch(r"[a-z0-9]", word) for word in words):
+        return True
+    if not all(word in _KEYBIND_WORDS or re.fullmatch(r"[a-z0-9]", word) for word in words):
+        return False
+    return any(word in _KEYBIND_UNAMBIGUOUS_WORDS for word in words)
+
+
 # 署名可能出現的鍵語境：音樂/唱片/畫作/音效說明與任務描述。值形署名
 # （"Name - Title"）只在這些鍵下才視為署名跳過——「Name - Variant」是
 # 方塊/物品名的常見樣式（the_vault "Alexandrite Ore - Stone"、neoncraft2
@@ -917,12 +957,34 @@ _KEY_CHORD_RE = re.compile(
 )
 
 
+# 常見 GUI/散文全大寫短詞(3-4 字母,≥5 由母音規則涵蓋):OPEN/BACK/NONE…
+# 是按鈕與狀態標籤而非縮寫,值整殺會讓 Xaero 地圖、FancyMenu 等自訂 GUI
+# 永遠英文。2 字母 ON/NO 走靜態譯表,不入此表。
+_COMMON_UPPER_WORDS = {
+    "ADD", "ALL", "BACK", "COLD", "COPY", "DENY", "DONE", "DOWN", "EDIT",
+    "EXIT", "HEAT", "HELP", "HIDE", "INFO", "LESS", "LOAD", "LOCK", "MORE",
+    "NEW", "NEXT", "NONE", "OPEN", "OVER", "PLAY", "SAVE", "SHOW", "SORT",
+    "STOP", "VIEW",
+}
+
+
 def _requires_visible_translation(source: str) -> bool:
     text = _PLACEHOLDERS.sub(" ", source)
     text = re.sub(r"[a-z][a-z0-9+.-]*://\S+", " ", text, flags=re.IGNORECASE)
     text = _KEY_CHORD_RE.sub(" ", text)
     words = re.findall(r"[A-Za-z][A-Za-z'-]*", text)
-    return any(_is_translation_required_word(word) for word in words)
+    if any(_is_translation_required_word(word) for word in words):
+        return True
+    # 全大寫片語("I SAID DART GUN!"、"[GO UP]"):≥2 個含母音的全大寫詞是
+    # 被大寫排版的句子/標籤,不是縮寫堆;無母音對(BL SL)與已知單位/選譯
+    # 縮寫(FE、AE、XP…——"2 FE = 1 AE (Forge)" 是換算式)不計入。
+    caps_words = [
+        w for w in words
+        if len(w) >= 2 and w.isupper() and any(ch in "AEIOUY" for ch in w)
+        and w.lower() not in _TRANSLATION_OPTIONAL_WORDS
+        and w.lower() not in _UNIT_WORDS
+    ]
+    return len(caps_words) >= 2
 
 
 def _is_translation_required_word(word: str) -> bool:
@@ -935,6 +997,9 @@ def _is_translation_required_word(word: str) -> bool:
         # 全大寫預設是縮寫（CPU、NBT、HTTPS）不可譯；但長度 ≥5 且含母音的
         # 全大寫 token 是被大寫排版的真單字（DOWNED、BROKEN、ROLLIN'——
         # the_vault 倒地標題、裝備損壞 tooltip、成就標題），仍要翻譯。
+        # 3-4 字母的常見 GUI 詞（OPEN/BACK/HEAT…）以白名單放行。
+        if normalized in _COMMON_UPPER_WORDS:
+            return True
         return len(normalized) >= 5 and any(ch in "AEIOUY" for ch in normalized.upper())
     if re.search(r"[a-z][A-Z]", normalized):
         return False
@@ -1292,9 +1357,9 @@ _PATCHOULI_TEXT_SUFFIXES = (
     "_description",
     "_label",
 )
+# 資源位置依 MC 規格僅小寫;大小寫混合的「Add/Edit」是 GUI 標籤要翻譯
 _RESOURCE_LOCATION_RE = re.compile(
     r"^[a-z0-9_.-]+(?::|/)[a-z0-9_./-]+(?:#[a-z0-9_./-]+)?$",
-    re.IGNORECASE,
 )
 _LOCALIZATION_KEY_RE = re.compile(r"^[a-z0-9_-]+(?:\.[a-z0-9_-]+)+$", re.IGNORECASE)
 _JSON_PATH_PART_RE = re.compile(

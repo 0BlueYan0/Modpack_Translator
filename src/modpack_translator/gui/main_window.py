@@ -84,6 +84,7 @@ _FMT_NAME_MAP: dict[str, str] = {
     "guideme_md":           "GuideME 指南內文 (Markdown)",
     "rct_names":            "RCT 訓練家名稱",
     "vh_config_json":       "Vault Hunters 設定文字",
+    "citadel_book_txt":     "Citadel 圖鑑書內文 (txt)",
 }
 
 

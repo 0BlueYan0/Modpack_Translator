@@ -7,7 +7,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from modpack_translator.pipeline import mdx, rct, vh
+from modpack_translator.pipeline import citadel, mdx, rct, vh
 from modpack_translator.pipeline.patcher import (
     read_jar_json_file,
     read_jar_json_lang,
@@ -451,6 +451,8 @@ def read_target_strings(target: TranslationTarget) -> dict[str, str]:
         return mdx.extract_meta(read_jar_text(target.source_file, target.path_in_jar))
     elif target.format == "rct_names":
         return rct.read_trainer_names(target)
+    elif target.format == "citadel_book_txt":
+        return citadel.extract_book_txt(read_jar_text(target.source_file, target.path_in_jar))
     return {}
 
 
@@ -481,6 +483,11 @@ def read_existing_target(target: TranslationTarget, lang_code: str) -> dict[str,
             try:
                 return mdx.extract_meta(read_jar_text(target.source_file, existing_path))
             except (KeyError, OSError, ValueError):
+                return {}
+        if target.format == "citadel_book_txt":
+            try:
+                return citadel.extract_book_txt(read_jar_text(target.source_file, existing_path))
+            except (KeyError, OSError):
                 return {}
         return {}
 
@@ -537,6 +544,9 @@ def process_target(
 
     if target.format == "rct_names":
         return _process_rct_names(target, translator, cache, retry_count, cancel_check, on_pair_done)
+
+    if target.format == "citadel_book_txt":
+        return _process_citadel_book(target, translator, cache, retry_count, cancel_check, on_pair_done)
 
     if target.format == "vh_config_json":
         return _process_vh_config(target, translator, cache, retry_count, cancel_check, on_pair_done)
@@ -795,6 +805,33 @@ def _process_mdx_page(
     if should_write:
         new_raw = mdx.rebuild_mdx(raw, merged)
         # 內容未變則不重寫(避免 re-run 無謂改動 jar)
+        if not (jar_member_exists(target.source_file, target.target_path_in_jar)
+                and read_jar_text(target.source_file, target.target_path_in_jar) == new_raw):
+            write_jar_text(target.source_file, target.target_path_in_jar, new_raw)
+    return n_translated, n_cached, n_fallback, failed
+
+
+def _process_citadel_book(
+    target: TranslationTarget,
+    translator: Any,
+    cache: dict[str, str],
+    retry_count: int = 0,
+    cancel_check=None,
+    on_pair_done=None,
+) -> tuple[int, int, int, dict[str, str]]:
+    """Citadel 書本 txt(Alex's Mobs 圖鑑等):整段散文送翻,譯文依 zh_cn 官方
+    慣例 CJK 折行(行間插 <NEWLINE>)後寫 zh_tw/ 鏡像檔。譯檔判定是檔級
+    (jar 內容隨版本不變),不做逐段 diff——zh_existing 一律傳空,快取負責去重;
+    全部失敗(重組後與原文相同)時不寫檔,下輪重掃可重試。"""
+    raw = read_jar_text(target.source_file, target.path_in_jar)
+    en = citadel.extract_book_txt(raw)
+    if not en:
+        return 0, 0, 0, {}
+    result, n_translated, n_cached, n_fallback, failed = translate_dict(
+        en, {}, translator, cache, retry_count, cancel_check, on_pair_done
+    )
+    new_raw = citadel.rebuild_book_txt(raw, result)
+    if new_raw != raw:
         if not (jar_member_exists(target.source_file, target.target_path_in_jar)
                 and read_jar_text(target.source_file, target.target_path_in_jar) == new_raw):
             write_jar_text(target.source_file, target.target_path_in_jar, new_raw)

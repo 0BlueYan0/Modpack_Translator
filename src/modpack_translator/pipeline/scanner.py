@@ -6,7 +6,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from modpack_translator.pipeline import mdx, rct, vh
+from modpack_translator.pipeline import citadel, mdx, rct, vh
 from modpack_translator.pipeline.preprocessor import (
     diff_keys,
     parse_json_lang,
@@ -22,7 +22,7 @@ class TranslationTarget:
     source_file: Path
     path_in_jar: str | None
     mod_id: str
-    format: str       # json_lang | legacy_lang | patchouli_json | ftbq_snbt | ftbq_inline_snbt | heracles_snbt | heracles_inline_snbt | bq_lang | kubejs_json | pack_json_lang | pack_legacy_lang | oracle_mdx | oracle_meta | guideme_md | rct_names
+    format: str       # json_lang | legacy_lang | patchouli_json | ftbq_snbt | ftbq_inline_snbt | heracles_snbt | heracles_inline_snbt | bq_lang | kubejs_json | pack_json_lang | pack_legacy_lang | oracle_mdx | oracle_meta | guideme_md | rct_names | citadel_book_txt | vh_config_json
     output_mode: str  # jar_inject | in_place
     output_lang_code: str = "zh_tw"
     target_path_in_jar: str | None = None      # 寫入目標:一律正規小寫（遊戲讀得到）
@@ -87,6 +87,7 @@ class ModpackScanner:
     def _scan_jar(self, jar_path: Path, lang_code: str, glossary=None) -> list[TranslationTarget]:
         targets: list[TranslationTarget] = []
         guideme_root_cache: dict[str, bool] = {}
+        citadel_root_cache: dict[str, bool] = {}
         try:
             with zipfile.ZipFile(jar_path) as zf:
                 names = zf.namelist()
@@ -145,6 +146,10 @@ class ModpackScanner:
                             target = self._scan_guideme_page(
                                 zf, jar_path, name, parts, name_set, lang_code, glossary, guideme_root_cache
                             )
+                        if target is None:
+                            target = self._scan_citadel_book_txt(
+                                zf, jar_path, name, parts, name_set, lang_code, citadel_root_cache
+                            )
                         if target is not None:
                             targets.append(target)
 
@@ -156,7 +161,9 @@ class ModpackScanner:
         return targets
 
     def _source_lang_extension(self, parts: list[str]) -> str | None:
-        if len(parts) != 4 or parts[0] != "assets" or parts[2] != "lang":
+        # data/<ns>/lang/ 是伺服端在地化(Open Parties and Claims 的聊天/指令
+        # 訊息 lang 放 data 側),與 assets 側同機制,一併掃描
+        if len(parts) != 4 or parts[0] not in ("assets", "data") or parts[2] != "lang":
             return None
         filename = parts[3]
         lower = filename.lower()
@@ -478,6 +485,82 @@ class ModpackScanner:
                 break
         cache[root] = ok
         return ok
+
+    # ------------------------------------------------------ Citadel 書本 txt
+
+    def _scan_citadel_book_txt(
+        self, zf, jar_path, name, parts, name_set, lang_code,
+        root_cache: dict[str, bool],
+    ) -> TranslationTarget | None:
+        """Citadel 書本內文(Alex's Mobs 圖鑑、Alex's Caves 洞穴書等)。頁面 JSON 的
+        "text" 指向 txt,GuiBasicBook 依遊戲語言讀 <書根>/<語言小寫>/<相對路徑>、
+        開檔失敗逐檔 fallback en_us/——官方多出貨 zh_cn 而無 zh_tw,不掃這面整本書
+        GUI 全英文。資格審查:書根子樹(en_us 之外)存在頁面 .json,排除一般文檔的
+        en_us txt 目錄。譯檔判定為檔級:zh_tw 檔含 CJK 即視為已翻(jar 內容隨版本
+        不變,無逐段增補需求)。"""
+        if not name.endswith(".txt"):
+            return None
+        if "en_us" not in parts[:-1]:
+            return None
+        idx = parts.index("en_us")
+        # 書根至少 assets/<ns>;lang/ 樹的 en_us 目錄不是書
+        if idx < 2 or parts[0] != "assets" or parts[idx - 1] == "lang":
+            return None
+        root_parts = parts[:idx]
+        rel_parts = parts[idx + 1:]
+        if not rel_parts or not rel_parts[-1]:
+            return None
+        root = "/".join(root_parts)
+        if not self._citadel_root_qualified(root, name_set, root_cache):
+            return None
+        rel = "/".join(rel_parts)
+        write = f"{root}/{lang_code.lower()}/{rel}"
+        existing = next(
+            (f"{root}/{cand}/{rel}" for cand in self._locale_candidates(lang_code)
+             if f"{root}/{cand}/{rel}" in name_set),
+            None,
+        )
+        if not self._citadel_txt_needs_translation(zf, name, existing):
+            return None
+        return TranslationTarget(
+            source_file=jar_path, path_in_jar=name, mod_id=parts[1],
+            format="citadel_book_txt", output_mode="jar_inject",
+            output_lang_code=lang_code,
+            target_path_in_jar=write, existing_path_in_jar=existing,
+        )
+
+    @staticmethod
+    def _citadel_root_qualified(root: str, name_set, cache: dict[str, bool]) -> bool:
+        """書根子樹內(locale 目錄之外)存在 .json → 是 Citadel 書(頁面定義檔)。"""
+        if root in cache:
+            return cache[root]
+        prefix = root + "/"
+        ok = any(
+            n.startswith(prefix) and n.endswith(".json")
+            for n in name_set
+        )
+        cache[root] = ok
+        return ok
+
+    def _citadel_txt_needs_translation(self, zf, source_path, existing_path) -> bool:
+        if getattr(self, "_include_translated", False):
+            return True
+        try:
+            source = citadel.extract_book_txt(zf.read(source_path).decode("utf-8-sig"))
+        except (KeyError, UnicodeDecodeError):
+            return False
+        if not source:
+            return False
+        # 全段皆不可譯(純代號/符號)→ 不成目標,避免永遠 pending
+        if not diff_keys(source, {}):
+            return False
+        if not existing_path:
+            return True
+        try:
+            existing_raw = zf.read(existing_path).decode("utf-8-sig")
+        except (KeyError, UnicodeDecodeError):
+            return True
+        return not citadel.has_cjk(existing_raw)
 
     def _oracle_meta_needs_translation(self, zf, source_path, existing_path, glossary) -> bool:
         if getattr(self, "_include_translated", False):

@@ -73,8 +73,10 @@ def test_stylized_all_caps_words_translate():
 
 def test_short_or_vowelless_acronyms_still_skipped():
     assert classify_translation_entry("gui.ae2.units.rf", "RF") != "translate"
-    assert classify_translation_entry("message.the_vault.off", "OFF") != "translate"
-    assert classify_translation_entry("message.the_vault.on", "ON") != "translate"
+    # v1.12.0 政策修訂:ON/OFF 是切換鈕狀態詞(xaero_pac_ui_on/off 等),
+    # 改走靜態譯表(開啟/關閉)確定性翻譯,不再視為縮寫跳過。
+    assert classify_translation_entry("message.the_vault.off", "OFF") == "translate"
+    assert classify_translation_entry("message.the_vault.on", "ON") == "translate"
     assert classify_translation_entry("item.the_vault.gem_pog", "POG") != "translate"
     assert classify_translation_entry("entity.the_vault.plastic_villager_tank", "NPV") != "translate"
     assert classify_translation_entry("some.mod.https_label", "HTTPS") != "translate"
