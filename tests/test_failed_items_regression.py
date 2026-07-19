@@ -322,6 +322,22 @@ def test_consonant_acronym_keyword_is_skipped():
     assert classify_translation_entry("item.create.wrench", "wrench") == "translate"
 
 
+def test_repeated_chant_easter_egg_is_skipped():
+    # botania: advancement.botania:desuGun.desc = "ASADA-SAN" ×12 彩蛋咒語。
+    # 官方 zh_cn/zh_tw 皆原樣保留;v1.10.0 放寬全大寫後曾把既有 zh==en 誤判
+    # 未翻譯而送翻,模型原樣返回被輸出關卡(>5 詞非專有名詞片語)誤殺。
+    chant = " ".join(["ASADA-SAN"] * 12)
+    assert classify_translation_entry("advancement.botania:desuGun.desc", chant) != "translate"
+    # 既有 zh==en(官方譯者的選擇)必須被視為可用,不再送翻
+    assert is_usable_translation(chant, chant) is True
+    # 用詞多樣的散文(含重複詞)仍要翻譯
+    assert classify_translation_entry(
+        "quest.0000000000000001.subtitle", "Dig dig dig your way down"
+    ) == "translate"
+    # 樣式化全大寫單字(v1.10.0 修正)不受影響,仍要翻譯
+    assert classify_translation_entry("the_vault.downed.title", "DOWNED") == "translate"
+
+
 def test_vocalization_subtitle_is_skipped():
     # botania: botania.subtitle.way = 純母音擬聲吟唱（Ievan Polkka），無可譯內容
     way = (

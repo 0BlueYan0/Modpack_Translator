@@ -603,6 +603,8 @@ def _is_untranslatable_value(value: str) -> bool:
         return True
     if _looks_like_vocalization(text):
         return True
+    if _looks_like_repeated_chant(text):
+        return True
     if _looks_like_color_code_art(text):
         return True
     if _looks_like_obfuscated_text(text):
@@ -668,6 +670,22 @@ def _looks_like_vocalization(text: str) -> bool:
     if vowels / len(letters) < 0.8:
         return False
     return bool(_VOCALIZATION_RUN_RE.search(plain))
+
+
+_CHANT_WORD_RE = re.compile(r"[A-Za-z][A-Za-z'-]*")
+
+
+def _looks_like_repeated_chant(text: str) -> bool:
+    """單一 token 連續複誦的彩蛋咒語（botania desuGun 的 "ASADA-SAN" ×12）。
+
+    內容字 case-fold 後只有一種且複誦 ≥3 次，是梗/吟唱：官方 zh_cn 與
+    zh_tw 皆原樣保留，模型原樣返回又會被輸出關卡（>5 詞不算專有名詞
+    片語）誤殺，直接視為不可譯。一般散文用詞多樣，不會誤觸。"""
+    plain = _PLACEHOLDERS.sub(" ", text)
+    words = _CHANT_WORD_RE.findall(plain)
+    if len(words) < 3:
+        return False
+    return len({word.lower() for word in words}) == 1
 
 
 _FORMAT_CODE_RE = re.compile(r"[§&]([0-9A-FK-ORa-fk-or])")
