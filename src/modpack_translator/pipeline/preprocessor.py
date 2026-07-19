@@ -805,6 +805,13 @@ def _is_keybind_chord(text: str) -> bool:
     """無鍵語境的值層按鍵判定:純單字符片段("%s x %s"、"N")或含明確按鍵
     token 的和弦("CTRL + ALT + D"、"Ctrl Shift %s")才算;單獨的
     "Delete"/"Command"/"Tab" 是 GUI 標籤,仍要翻譯。"""
+    # 方括號包住的按鍵詞(gateways "[shift]"):鍵提示片段而非 GUI 標籤,
+    # 官方 zh_tw 亦原樣保留;模型只能原樣返回、非 CJK 必被輸出關卡拒收。
+    # 括號內全為按鍵詞才算(單一 ambiguous 詞在此語境可斷定是按鍵),
+    # [ACCEPT]/[Add] 等非按鍵詞標籤不受影響。
+    m = re.fullmatch(r"\[([^\[\]]+)\]", text.strip())
+    if m and _is_keybind_or_shortcut(m.group(1)):
+        return True
     simplified = re.sub(r"[_+/,|()-]+", " ", text.lower())
     words = re.findall(r"[a-z0-9-]+", simplified)
     if not words:

@@ -73,6 +73,17 @@ def test_bracketed_word_labels_translate():
     assert classify_translation_entry("gui.xaero_waypoint_shared_add", " [Add]") == "translate"
 
 
+def test_bracketed_keybind_words_still_skipped():
+    """gateways "[shift]" 實跑失敗回歸:方括號包住的按鍵詞是鍵提示片段
+    (官方 zh_tw 也原樣保留),模型只能原樣返回、非 CJK 必被輸出關卡拒收,
+    不得送翻;方括號 GUI 標籤([ACCEPT]/[Add])不受影響。"""
+    assert classify_translation_entry("tooltip.gateways.shift", "[shift]") != "translate"
+    assert classify_translation_entry("some.key", "[Ctrl]") != "translate"
+    assert classify_translation_entry("some.key", "[TAB]") != "translate"
+    # 既有 zh_tw 原樣保留 "[shift]" 視為已處理,不再進 diff
+    assert is_usable_translation("[shift]", "[shift]")
+
+
 def test_on_off_ok_static_translations():
     for src, zh in (("ON", "開啟"), ("OFF", "關閉"), ("OK", "確定"), ("YES", "是"), ("NO", "否")):
         assert STATIC_TRANSLATIONS[src] == zh
