@@ -878,7 +878,8 @@ def _process_vh_class_literals(
                     pack_context.maybe_record(src, value, glossary)
             else:
                 n_cached += 1
-            mapping.setdefault(cls, {})[lit] = restored
+            if restored != lit:  # 接受的原樣返回不做無效 jar 改寫
+                mapping.setdefault(cls, {})[lit] = restored
             if on_pair_done is not None:
                 on_pair_done(1)
     if mapping:

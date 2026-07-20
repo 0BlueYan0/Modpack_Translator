@@ -615,6 +615,8 @@ def _is_untranslatable_value(value: str) -> bool:
         return True
     if _is_keybind_chord(text):
         return True
+    if _looks_like_token_priority_chain(text):
+        return True
     if _looks_like_code_or_table_line(text):
         return True
     if _looks_like_function_signature(text):
@@ -805,6 +807,18 @@ _KEYBIND_UNAMBIGUOUS_WORDS = {
     "alt", "cmd", "ctrl", "meta", "r-click",
     *(f"f{i}" for i in range(1, 13)),
 }
+
+
+# 純 token 優先序記號（Complementary 光影選項值 "seuspbr > IPBR+"：資源包
+# 格式優先序）：比較符兩側皆為單一技術 token、無句子結構——模型只能原樣
+# 返回、非 CJK 必被輸出關卡拒收，直接視為不可譯原樣保留。刻意不含 "->"
+# （合成轉換箭頭兩側可能是可譯的物品名）；多詞段落（"Options > Video
+# Settings"）因非單一 token 不命中，仍照常翻譯。
+_TOKEN_PRIORITY_CHAIN_RE = re.compile(r"[\w+#.\-]+(?:\s+[<>»]\s+[\w+#.\-]+)+")
+
+
+def _looks_like_token_priority_chain(text: str) -> bool:
+    return bool(_TOKEN_PRIORITY_CHAIN_RE.fullmatch(text.strip()))
 
 
 def _is_keybind_chord(text: str) -> bool:

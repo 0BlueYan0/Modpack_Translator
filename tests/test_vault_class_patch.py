@@ -203,6 +203,20 @@ def test_extract_only_multiword_display_literals(tmp_path):
     assert literals == {_SCREEN_CLS: ["Claim Rewards", "Total: \x01"]}
 
 
+def test_extract_skips_untranslatable_and_tostring_literals(tmp_path):
+    # "LVL \x01"（縮寫＋槽位，無可翻內容）與 toString 樣板（字面大括號）
+    # 送翻只會原樣返回，修補為相同 bytes 後每輪重新入列空轉 → 不收
+    cls = "iskallia/vault/client/gui/screen/summary/element/VaultLevelBarWithRewardElement.class"
+    _make_jar(tmp_path, {cls: _class_file(
+        _utf8("LVL \x01"), _string(1),
+        _utf8("TextureAtlasRegion{\x01, \x01}"), _string(3),
+        _utf8("Claim Rewards"), _string(5),
+    )})
+    from modpack_translator.pipeline.patcher import find_vault_jar
+
+    assert extract_vault_ui_literals(find_vault_jar(tmp_path)) == {cls: ["Claim Rewards"]}
+
+
 def test_extract_skips_curated_whitelist(tmp_path):
     tabbed = "iskallia/vault/client/gui/screen/custom/TabbedScreen.class"
     # "Vault Hunters Options" 在白名單 → 不入自動清單

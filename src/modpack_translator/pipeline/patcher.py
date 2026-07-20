@@ -13,6 +13,7 @@ from typing import Any
 
 from modpack_translator.pipeline import vh
 from modpack_translator.pipeline.preprocessor import (
+    _has_translatable_text,
     format_snbt_lang,
     parse_json_lang,
     parse_legacy_lang,
@@ -343,7 +344,15 @@ def _is_display_literal(s: str) -> bool:
         return False
     if "://" in s or s.startswith(("gui/", "textures/", "the_vault")):
         return False
-    return bool(_DISPLAY_LITERAL_RE.match(s))
+    # 字面大括號幾乎必為 toString 樣板（"TextureAtlasRegion{\x01, \x01}"），
+    # 非 UI 顯示文句（串接槽位是 \x01 不是大括號）
+    if "{" in s or "}" in s:
+        return False
+    if not _DISPLAY_LITERAL_RE.match(s):
+        return False
+    # 無可翻譯內容者（"LVL \x01"：縮寫＋槽位）送翻只會原樣返回被接受，
+    # 修補為相同 bytes 後每輪重新入列空轉——直接不收
+    return _has_translatable_text(s.replace("\x01", " ").strip())
 
 
 def extract_vault_ui_literals(jar_path: Path) -> dict[str, list[str]]:

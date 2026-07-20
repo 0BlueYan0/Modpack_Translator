@@ -683,3 +683,27 @@ def test_link_key_with_prose_still_translates():
     assert classify_translation_entry(
         "gui.mod.open_link", "Click here to open the link"
     ) == "translate"
+
+
+# ── 5. v1.15.0 Failed Items:光影選項值的 token 優先序記號 ─────────────
+
+def test_shader_priority_chain_value_is_skipped():
+    # ComplementaryUnbound value.IPBR_EMISSIVE_MODE.2 = "seuspbr > IPBR+":
+    # 資源包格式優先序記號,兩側皆技術 token,模型只能原樣返回 → 不可譯
+    assert classify_translation_entry(
+        "value.IPBR_EMISSIVE_MODE.2", "seuspbr > IPBR+"
+    ) == "skip"
+    assert is_usable_translation("seuspbr > IPBR+", "seuspbr > IPBR+")
+    assert classify_translation_entry("value.MODE.1", "A > B > C") == "skip"
+
+
+def test_priority_chain_rule_does_not_overkill():
+    # 防過度放寬:含多詞段或句子結構的 ">" 文字仍要翻譯
+    assert classify_translation_entry(
+        "gui.path", "Options > Video Settings > Quality"
+    ) == "translate"
+    assert classify_translation_entry(
+        "tooltip.compare", "Deals more damage > 10 hearts total"
+    ) == "translate"
+    # 合成轉換箭頭("->")兩側是可譯物品名,刻意不納入此規則
+    assert classify_translation_entry("tooltip.convert", "Iron -> Gold") == "translate"
