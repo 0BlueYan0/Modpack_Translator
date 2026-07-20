@@ -121,6 +121,19 @@ def read_source_text(path: Path) -> dict[str, str]:
 apply_text = write_patchouli_text
 
 
+def needs_ascii_reencode(path: Path | None) -> bool:
+    """輸出檔含原始非 ASCII 位元組即需重寫為 \\uXXXX 跳脫。the_vault 以單參數
+    FileReader（平台預設字集，Windows 為 MS950/GBK）讀 config 在地化檔與
+    translations.json——原始 UTF-8 中文在遊戲內必亂碼；純 ASCII 跳脫檔
+    任何字集都解得對（GSON 還原跳脫）。"""
+    if path is None or not path.is_file():
+        return False
+    try:
+        return any(b > 0x7F for b in path.read_bytes())
+    except OSError:
+        return False
+
+
 def preserve_edges(source: str, translated: str) -> str:
     """譯文首尾空白以原文為準（quest 描述段以 "\\n\\n" 前綴分段，翻譯管線
     會剝掉邊緣空白——遺失會讓任務書段落擠成一團）。譯文為空白時原樣返回。"""

@@ -212,6 +212,44 @@ def test_preserve_edges():
     assert vh.preserve_edges("\n\nHello.", "   ") == "   "
 
 
+# ── 平台字集亂碼防護：輸出一律 \uXXXX 跳脫純 ASCII ──────────────────────
+# the_vault 以單參數 FileReader（平台預設字集，Windows=MS950/GBK）讀
+# config 在地化檔——原始 UTF-8 中文在遊戲內必亂碼；GSON 會還原跳脫。
+
+def test_output_is_pure_ascii_escaped(tmp_path):
+    root = _make_vh(tmp_path)
+    targets = {t.source_file.name: t for t in _vh_targets(root)}
+    process_target(targets["quests.json"], _Dict({
+        "Vault Hunters Introduction": "寶庫獵人介紹",
+        "Welcome to Vault Hunters!": "歡迎來到寶庫獵人！",
+    }), {}, "zh_tw")
+    out = root / "config" / "the_vault" / "lang" / "zh_tw" / "quest" / "quests.json"
+    raw = out.read_bytes()
+    assert all(b <= 0x7F for b in raw), "輸出必須是純 ASCII（\\uXXXX 跳脫）"
+    assert json.loads(raw.decode("ascii"))["quests"][0]["name"] == "寶庫獵人介紹"
+
+
+def test_raw_utf8_existing_output_flagged_and_reencoded(tmp_path):
+    """舊版寫出的原始 UTF-8 中文檔（遊戲內亂碼）→ 掃描標記、零 API 重編碼。"""
+    root = _make_vh(tmp_path)
+    translated = json.loads(json.dumps(_QUESTS))
+    translated["quests"][0]["name"] = "寶庫獵人介紹"
+    translated["quests"][0]["descriptionData"]["description"][0]["text"] = "歡迎來到寶庫獵人！"
+    out = root / "config" / "the_vault" / "lang" / "zh_tw" / "quest" / "quests.json"
+    out.parent.mkdir(parents=True)
+    out.write_text(json.dumps(translated, ensure_ascii=False), encoding="utf-8")
+    assert any(b > 0x7F for b in out.read_bytes())
+
+    targets = [t for t in _vh_targets(root) if t.source_file.name == "quests.json"]
+    assert targets, "原始非 ASCII 輸出應被掃出重編碼"
+    process_target(targets[0], _Boom(), {}, "zh_tw")  # 不得呼叫 API
+    raw = out.read_bytes()
+    assert all(b <= 0x7F for b in raw)
+    assert json.loads(raw.decode("ascii"))["quests"][0]["name"] == "寶庫獵人介紹"
+    # 重編碼後冪等
+    assert [t for t in _vh_targets(root) if t.source_file.name == "quests.json"] == []
+
+
 # ── translations.json 就地翻譯（MixinClientLanguage 語言表注入來源） ─────
 
 _TRANSLATIONS = {

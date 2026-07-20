@@ -1004,6 +1004,10 @@ class ModpackScanner:
                 existing = {}
         if diff_keys(source, existing, glossary=glossary):
             return True
+        # 既有輸出含原始非 ASCII：the_vault 以平台字集 FileReader 讀檔，
+        # 遊戲內必亂碼 → 需重寫為 \uXXXX 跳脫（runner 零 API 重編碼）
+        if vh.needs_ascii_reencode(existing_file):
+            return True
         # 既有譯文首尾空白與原文不符（quest 描述段的 "\n\n" 前綴被翻譯管線
         # 剝掉會讓任務書段落擠成一團）→ 需修復（runner 套用時零 API 補回）
         return any(

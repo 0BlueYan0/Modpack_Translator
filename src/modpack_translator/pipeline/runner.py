@@ -422,9 +422,14 @@ def _read_local_json_dict(path: Path | None) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _write_local_json(path: Path, payload: Any) -> None:
+def _write_local_json(path: Path, payload: Any, *, ensure_ascii: bool = False) -> None:
+    """ensure_ascii=True 供讀取端用平台預設字集開檔的模組（the_vault 以單參數
+    FileReader 讀 config——Windows 上是 MS950/GBK 而非 UTF-8，原始中文必亂碼；
+    \\uXXXX 跳脫的純 ASCII 檔任何字集都解得對，GSON 會還原跳脫）。"""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, ensure_ascii=ensure_ascii, indent=2), encoding="utf-8"
+    )
 
 
 def read_target_strings(target: TranslationTarget) -> dict[str, str]:
@@ -793,8 +798,10 @@ def _process_vh_config(
             on_pair_done(1)
 
     target_missing = not target.target_file.exists()
-    if changed or (target_missing and bool(existing_data)):
-        _write_local_json(target.target_file, data)
+    # 既有輸出含原始非 ASCII（舊版寫法）→ 遊戲以平台字集解碼必亂碼，重寫跳脫
+    needs_reencode = vh.needs_ascii_reencode(target.target_file)
+    if changed or needs_reencode or (target_missing and bool(existing_data)):
+        _write_local_json(target.target_file, data, ensure_ascii=True)
 
     return n_translated, n_cached, n_fallback, failed
 
