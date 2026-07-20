@@ -122,3 +122,54 @@ def test_plan_sync_skips_missing_source(tmp_path):
     manifest = [sync.ManifestEntry("gone.snbt", "ftbq_snbt")]  # 客戶端無此檔
     plan = sync.plan_sync(client, server, manifest)
     assert plan.items == []
+
+
+def test_apply_sync_copies_overwrites_backs_up(tmp_path):
+    client = tmp_path / "client"
+    server = tmp_path / "server"
+    _write(client / "a.snbt", "AAA")
+    _write(client / "b.snbt", "NEW")
+    _write(client / "c.snbt", "SAME")
+    _write(server / "b.snbt", "OLD")
+    _write(server / "c.snbt", "SAME")
+    manifest = [
+        sync.ManifestEntry("a.snbt", "ftbq_snbt"),
+        sync.ManifestEntry("b.snbt", "ftbq_snbt"),
+        sync.ManifestEntry("c.snbt", "ftbq_snbt"),
+    ]
+    plan = sync.plan_sync(client, server, manifest)
+    backup = server / ".modpack_translator" / "sync_bak" / "20260720_120000"
+    result = sync.apply_sync(plan, client, server, backup)
+
+    # 複製與覆蓋生效
+    assert (server / "a.snbt").read_text(encoding="utf-8") == "AAA"
+    assert (server / "b.snbt").read_text(encoding="utf-8") == "NEW"
+    # 覆蓋前的原檔已備份且可還原
+    assert (backup / "b.snbt").read_text(encoding="utf-8") == "OLD"
+    # skip 的檔不進備份
+    assert not (backup / "c.snbt").exists()
+    assert set(result.copied) == {"a.snbt"}
+    assert set(result.overwritten) == {"b.snbt"}
+    assert set(result.skipped) == {"c.snbt"}
+    assert result.backup_dir == backup
+
+
+def test_apply_sync_no_backup_dir_when_no_overwrite(tmp_path):
+    client = tmp_path / "client"
+    server = tmp_path / "server"
+    _write(client / "a.snbt", "AAA")
+    plan = sync.plan_sync(client, server, [sync.ManifestEntry("a.snbt", "ftbq_snbt")])
+    backup = server / ".modpack_translator" / "sync_bak" / "ts"
+    sync.apply_sync(plan, client, server, backup)
+    assert (server / "a.snbt").read_text(encoding="utf-8") == "AAA"
+    assert not backup.exists()   # 沒有 overwrite 就不建備份資料夾
+
+
+def test_apply_sync_never_deletes_server_extra(tmp_path):
+    client = tmp_path / "client"
+    server = tmp_path / "server"
+    _write(client / "a.snbt", "AAA")
+    _write(server / "extra.snbt", "KEEP")
+    plan = sync.plan_sync(client, server, [sync.ManifestEntry("a.snbt", "ftbq_snbt")])
+    sync.apply_sync(plan, client, server, server / "bak")
+    assert (server / "extra.snbt").read_text(encoding="utf-8") == "KEEP"

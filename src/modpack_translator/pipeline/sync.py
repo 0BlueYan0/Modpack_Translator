@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import filecmp
 import json
+import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -129,3 +130,50 @@ def plan_sync(client_root: Path, server_root: Path, manifest: list[ManifestEntry
         else:
             items.append(SyncItem(rel, "overwrite"))
     return SyncPlan(items)
+
+
+@dataclass
+class SyncResult:
+    copied: list[str]
+    overwritten: list[str]
+    skipped: list[str]
+    failed: list[tuple[str, str]]      # (rel_path, 錯誤訊息)
+    backup_dir: Path | None
+
+
+def apply_sync(plan: SyncPlan, client_root: Path, server_root: Path, backup_dir: Path,
+               on_progress=None) -> SyncResult:
+    """依 plan 執行實際複製：copy 補檔、overwrite 先備份原檔再覆蓋、skip 略過。
+    backup_dir 由呼叫端傳入(含時間戳),只有真的發生 overwrite 才建立並使用；
+    絕不刪除伺服器端既有檔（manifest 未涵蓋或 skip 的一律原樣保留）。"""
+    copied: list[str] = []
+    overwritten: list[str] = []
+    skipped: list[str] = []
+    failed: list[tuple[str, str]] = []
+    backup_used = False
+
+    actionable = [i for i in plan.items if i.action in ("copy", "overwrite")]
+    total = len(actionable)
+    done = 0
+    for item in plan.items:
+        if item.action == "skip":
+            skipped.append(item.rel_path)
+            continue
+        src = client_root / item.rel_path
+        dst = server_root / item.rel_path
+        try:
+            if item.action == "overwrite":
+                bak = backup_dir / item.rel_path
+                bak.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(dst), str(bak))
+                backup_used = True
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(src), str(dst))
+            (overwritten if item.action == "overwrite" else copied).append(item.rel_path)
+        except OSError as exc:
+            failed.append((item.rel_path, str(exc)))
+        done += 1
+        if on_progress is not None:
+            on_progress(done, total)
+    return SyncResult(copied, overwritten, skipped, failed,
+                      backup_dir if backup_used else None)
