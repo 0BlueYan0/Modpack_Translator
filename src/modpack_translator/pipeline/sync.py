@@ -7,6 +7,10 @@
 """
 from __future__ import annotations
 
+import json
+from dataclasses import asdict, dataclass
+from pathlib import Path
+
 # 伺服器端格式（唯一真相）。vh_config_json 經反編譯確認為客戶端載入，不列入。
 SERVER_SIDE_FORMATS: frozenset[str] = frozenset({
     "ftbq_snbt",
@@ -20,3 +24,42 @@ SERVER_SIDE_FORMATS: frozenset[str] = frozenset({
 
 def is_server_side(fmt: str) -> bool:
     return fmt in SERVER_SIDE_FORMATS
+
+
+@dataclass(frozen=True)
+class ManifestEntry:
+    rel_path: str          # 相對客戶端遊戲根，一律用正斜線
+    format: str
+
+
+def manifest_path(game_root: Path) -> Path:
+    return game_root / ".modpack_translator" / "sync_manifest.json"
+
+
+def load_manifest(game_root: Path) -> list[ManifestEntry]:
+    path = manifest_path(game_root)
+    if not path.is_file():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return []
+    if not isinstance(raw, list):
+        return []
+    entries: list[ManifestEntry] = []
+    for item in raw:
+        if isinstance(item, dict) and isinstance(item.get("rel_path"), str) \
+                and isinstance(item.get("format"), str):
+            entries.append(ManifestEntry(item["rel_path"], item["format"]))
+    return entries
+
+
+def merge_manifest(game_root: Path, entries: list[ManifestEntry]) -> None:
+    """以 rel_path 為鍵聯集合併後寫回（跨多次翻譯保持完整）。"""
+    merged: dict[str, ManifestEntry] = {e.rel_path: e for e in load_manifest(game_root)}
+    for e in entries:
+        merged[e.rel_path] = e
+    path = manifest_path(game_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = [asdict(e) for e in merged.values()]
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
