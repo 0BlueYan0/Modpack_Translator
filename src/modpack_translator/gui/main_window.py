@@ -593,7 +593,109 @@ class MainWindow(QMainWindow):
         )
 
     def _on_sync_clicked(self):
-        QMessageBox.information(self, "同步", "同步邏輯將於下一步接上。")
+        from datetime import datetime
+        from modpack_translator.pipeline import sync as sync_mod
+        from modpack_translator.pipeline.scanner import ModpackScanner, resolve_game_root
+
+        client_text = self.modpack_edit.text().strip()
+        server_text = self.server_dir_edit.text().strip()
+        if not client_text:
+            QMessageBox.warning(self, "同步", "請先選擇模組包（客戶端）資料夾。")
+            return
+        if not server_text:
+            QMessageBox.warning(self, "同步", "請先選擇伺服器資料夾。")
+            return
+
+        client_root = resolve_game_root(Path(client_text))
+        server_root = resolve_game_root(Path(server_text))
+        if not server_root.is_dir():
+            QMessageBox.warning(self, "同步", "伺服器資料夾不存在或不是資料夾。")
+            return
+        if client_root.resolve() == server_root.resolve():
+            QMessageBox.warning(self, "同步", "客戶端與伺服器解析後是同一個資料夾，無法同步。")
+            return
+
+        # 取得 manifest；缺則即時掃描重建（相容既有已翻實例）
+        manifest = sync_mod.load_manifest(client_root)
+        if not manifest:
+            reply = QMessageBox.question(
+                self, "建立同步清單",
+                "找不到同步清單（可能是舊版翻譯或尚未翻譯）。\n"
+                "要現在掃描客戶端建立清單嗎？（約需數十秒）",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            targets = ModpackScanner().scan(client_root, "zh_tw", None, include_translated=True)
+            manifest = sync_mod.build_manifest_from_targets(targets, client_root)
+            if manifest:
+                sync_mod.merge_manifest(client_root, manifest)
+
+        plan = sync_mod.plan_sync(client_root, server_root, manifest)
+        n_copy = len(plan.copies)
+        n_over = len(plan.overwrites)
+        n_skip = len(plan.skips)
+        if n_copy == 0 and n_over == 0:
+            QMessageBox.information(
+                self, "同步",
+                "沒有需要同步的伺服器端內容"
+                + ("（全部已是最新）。" if n_skip else "。"),
+            )
+            return
+
+        preview = (
+            f"將同步到：{server_root}\n\n"
+            f"新增複製：{n_copy} 個\n"
+            f"覆蓋（會先備份）：{n_over} 個\n"
+            f"略過（已相同）：{n_skip} 個\n\n"
+            + "\n".join(f"  + {i.rel_path}" for i in plan.copies[:20])
+            + ("\n  …" if n_copy > 20 else "")
+            + ("\n" if plan.overwrites else "")
+            + "\n".join(f"  ~ {i.rel_path}" for i in plan.overwrites[:20])
+            + ("\n  …" if n_over > 20 else "")
+            + "\n\n確定要同步嗎？"
+        )
+        reply = QMessageBox.question(
+            self, "確認同步", preview,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_dir = server_root / ".modpack_translator" / "sync_bak" / ts
+        self._start_sync(plan, client_root, server_root, backup_dir)
+
+    def _start_sync(self, plan, client_root, server_root, backup_dir):
+        self.sync_btn.setEnabled(False)
+        self.sync_btn.setText("同步中…")
+        self._sync_worker = SyncWorker(plan, client_root, server_root, backup_dir)
+        self._sync_worker.log.connect(self.log_edit.append)
+        self._sync_worker.finished.connect(self._on_sync_done)
+        self._sync_worker.error.connect(self._on_sync_error)
+        self._sync_worker.start()
+
+    def _on_sync_done(self, result):
+        self.sync_btn.setText("同步到伺服器")
+        self._update_sync_btn_enabled()
+        msg = (
+            f"同步完成。\n\n"
+            f"新增：{len(result.copied)} 個\n"
+            f"覆蓋：{len(result.overwritten)} 個\n"
+            f"略過：{len(result.skipped)} 個"
+        )
+        if result.backup_dir is not None:
+            msg += f"\n\n原檔備份於：\n{result.backup_dir}"
+        if result.failed:
+            msg += f"\n\n⚠ {len(result.failed)} 個檔失敗：\n" + "\n".join(
+                f"  {rel}：{err}" for rel, err in result.failed[:10]
+            )
+        QMessageBox.information(self, "同步", msg)
+
+    def _on_sync_error(self, msg: str):
+        self.sync_btn.setText("同步到伺服器")
+        self._update_sync_btn_enabled()
+        QMessageBox.critical(self, "同步失敗", msg)
 
     def _browse_gguf(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1334,6 +1436,10 @@ class MainWindow(QMainWindow):
             if not self._update_check_worker.wait(2_000):
                 self._update_check_worker.terminate()
                 self._update_check_worker.wait(1_000)
+        if getattr(self, "_sync_worker", None) and self._sync_worker.isRunning():
+            if not self._sync_worker.wait(3_000):
+                self._sync_worker.terminate()
+                self._sync_worker.wait(1_000)
         event.accept()
 
 
@@ -1400,3 +1506,27 @@ class ConnTestWorker(QThread):
         from modpack_translator.pipeline.remote_translator import test_remote_connection
         ok, msg = test_remote_connection(self._base_url, self._api_key, self._model)
         self.done.emit(ok, msg)
+
+
+class SyncWorker(QThread):
+    finished = Signal(object)      # SyncResult
+    error    = Signal(str)
+    log      = Signal(str)
+
+    def __init__(self, plan, client_root, server_root, backup_dir):
+        super().__init__()
+        self._plan = plan
+        self._client_root = client_root
+        self._server_root = server_root
+        self._backup_dir = backup_dir
+
+    def run(self):
+        try:
+            from modpack_translator.pipeline import sync as sync_mod
+            result = sync_mod.apply_sync(
+                self._plan, self._client_root, self._server_root, self._backup_dir,
+                on_progress=lambda done, total: self.log.emit(f"同步中… {done}/{total}"),
+            )
+            self.finished.emit(result)
+        except Exception as exc:  # noqa: BLE001
+            self.error.emit(str(exc))
