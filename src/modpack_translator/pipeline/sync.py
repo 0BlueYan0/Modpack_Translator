@@ -130,6 +130,10 @@ def plan_sync(client_root: Path, server_root: Path, manifest: list[ManifestEntry
         dst = server_root / rel
         if not dst.exists():
             items.append(SyncItem(rel, "copy"))
+        elif not dst.is_file():
+            # 伺服器端該路徑不是一般檔（如目錄）：filecmp 會拋，視為需覆蓋
+            # 由 apply_sync 端處理/記錄，不在此拋例外
+            items.append(SyncItem(rel, "overwrite"))
         elif filecmp.cmp(str(src), str(dst), shallow=False):
             items.append(SyncItem(rel, "skip"))
         else:

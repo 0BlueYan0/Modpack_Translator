@@ -131,6 +131,17 @@ def test_plan_sync_four_cases(tmp_path):
     assert {i.rel_path for i in plan.skips} == {"c.snbt"}
 
 
+def test_plan_sync_dir_at_dst_is_overwrite_not_crash(tmp_path):
+    # 伺服器端該路徑恰為目錄時，filecmp 會拋——plan_sync 應歸為 overwrite
+    # 而非拋例外（極低機率邊界，但不可讓整個規劃崩潰）。
+    client = tmp_path / "client"
+    server = tmp_path / "server"
+    _write(client / "a.snbt", "AAA")
+    (server / "a.snbt").mkdir(parents=True)  # 伺服器端 a.snbt 是目錄
+    plan = sync.plan_sync(client, server, [sync.ManifestEntry("a.snbt", "ftbq_snbt")])
+    assert [(i.rel_path, i.action) for i in plan.items] == [("a.snbt", "overwrite")]
+
+
 def test_plan_sync_skips_missing_source(tmp_path):
     client = tmp_path / "client"
     server = tmp_path / "server"

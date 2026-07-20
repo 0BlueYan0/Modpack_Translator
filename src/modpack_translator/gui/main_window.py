@@ -110,6 +110,8 @@ class MainWindow(QMainWindow):
         self._update_progress_dialog: QProgressDialog | None = None
         self._update_download_info: UpdateInfo | None = None
         self._conn_test_worker = None
+        self._sync_worker = None
+        self._manifest_scan_worker = None
 
         self._translated_modpack_path: str = ""
         self._translation_start_time: float = 0.0
@@ -593,9 +595,8 @@ class MainWindow(QMainWindow):
         )
 
     def _on_sync_clicked(self):
-        from datetime import datetime
         from modpack_translator.pipeline import sync as sync_mod
-        from modpack_translator.pipeline.scanner import ModpackScanner, resolve_game_root
+        from modpack_translator.pipeline.scanner import resolve_game_root
 
         client_text = self.modpack_edit.text().strip()
         server_text = self.server_dir_edit.text().strip()
@@ -608,6 +609,9 @@ class MainWindow(QMainWindow):
 
         client_root = resolve_game_root(Path(client_text))
         server_root = resolve_game_root(Path(server_text))
+        if not client_root.is_dir():
+            QMessageBox.warning(self, "同步", "模組包（客戶端）資料夾不存在或不是資料夾。")
+            return
         if not server_root.is_dir():
             QMessageBox.warning(self, "同步", "伺服器資料夾不存在或不是資料夾。")
             return
@@ -615,21 +619,45 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "同步", "客戶端與伺服器解析後是同一個資料夾，無法同步。")
             return
 
-        # 取得 manifest；缺則即時掃描重建（相容既有已翻實例）
+        # 取得 manifest；缺則背景掃描重建（相容既有已翻實例，掃描讀全部 jar
+        # 可能耗數十秒，放背景執行緒避免凍結 UI）
         manifest = sync_mod.load_manifest(client_root)
-        if not manifest:
-            reply = QMessageBox.question(
-                self, "建立同步清單",
-                "找不到同步清單（可能是舊版翻譯或尚未翻譯）。\n"
-                "要現在掃描客戶端建立清單嗎？（約需數十秒）",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if reply != QMessageBox.StandardButton.Yes:
+        if manifest:
+            self._run_sync_with_manifest(manifest, client_root, server_root)
+            return
+
+        reply = QMessageBox.question(
+            self, "建立同步清單",
+            "找不到同步清單（可能是舊版翻譯或尚未翻譯）。\n"
+            "要現在掃描客戶端建立清單嗎？（約需數十秒）",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self.sync_btn.setEnabled(False)
+        self.sync_btn.setText("掃描中…")
+        self._manifest_scan_worker = ManifestScanWorker(client_root)
+
+        def _on_scanned(manifest_entries):
+            self.sync_btn.setText("同步到伺服器")
+            self._update_sync_btn_enabled()
+            if not manifest_entries:
+                QMessageBox.information(self, "同步", "沒有需要同步的伺服器端內容。")
                 return
-            targets = ModpackScanner().scan(client_root, "zh_tw", None, include_translated=True)
-            manifest = sync_mod.build_manifest_from_targets(targets, client_root)
-            if manifest:
-                sync_mod.merge_manifest(client_root, manifest)
+            self._run_sync_with_manifest(manifest_entries, client_root, server_root)
+
+        def _on_scan_error(msg):
+            self.sync_btn.setText("同步到伺服器")
+            self._update_sync_btn_enabled()
+            QMessageBox.critical(self, "同步失敗", f"掃描客戶端失敗：\n{msg}")
+
+        self._manifest_scan_worker.finished.connect(_on_scanned)
+        self._manifest_scan_worker.error.connect(_on_scan_error)
+        self._manifest_scan_worker.start()
+
+    def _run_sync_with_manifest(self, manifest, client_root, server_root):
+        from datetime import datetime
+        from modpack_translator.pipeline import sync as sync_mod
 
         plan = sync_mod.plan_sync(client_root, server_root, manifest)
         n_copy = len(plan.copies)
@@ -1440,6 +1468,10 @@ class MainWindow(QMainWindow):
             if not self._sync_worker.wait(3_000):
                 self._sync_worker.terminate()
                 self._sync_worker.wait(1_000)
+        if getattr(self, "_manifest_scan_worker", None) and self._manifest_scan_worker.isRunning():
+            if not self._manifest_scan_worker.wait(3_000):
+                self._manifest_scan_worker.terminate()
+                self._manifest_scan_worker.wait(1_000)
         event.accept()
 
 
@@ -1528,5 +1560,28 @@ class SyncWorker(QThread):
                 on_progress=lambda done, total: self.log.emit(f"同步中… {done}/{total}"),
             )
             self.finished.emit(result)
+        except Exception as exc:  # noqa: BLE001
+            self.error.emit(str(exc))
+
+
+class ManifestScanWorker(QThread):
+    """背景掃描客戶端建立同步 manifest（讀全部 jar 可能耗數十秒，放背景
+    執行緒避免凍結 UI）。相容既有已翻實例首次同步（尚無 manifest）。"""
+    finished = Signal(object)      # list[sync.ManifestEntry]
+    error    = Signal(str)
+
+    def __init__(self, client_root):
+        super().__init__()
+        self._client_root = client_root
+
+    def run(self):
+        try:
+            from modpack_translator.pipeline import sync as sync_mod
+            from modpack_translator.pipeline.scanner import ModpackScanner
+            targets = ModpackScanner().scan(self._client_root, "zh_tw", None, include_translated=True)
+            manifest = sync_mod.build_manifest_from_targets(targets, self._client_root)
+            if manifest:
+                sync_mod.merge_manifest(self._client_root, manifest)
+            self.finished.emit(manifest)
         except Exception as exc:  # noqa: BLE001
             self.error.emit(str(exc))
