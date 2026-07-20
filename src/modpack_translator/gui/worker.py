@@ -31,6 +31,7 @@ from modpack_translator.pipeline.runner import (
     sync_source_sidecar,
 )
 from modpack_translator.pipeline.scanner import ModpackScanner, TranslationTarget, resolve_game_root
+from modpack_translator.pipeline import sync as sync_mod
 from modpack_translator.pipeline._chat import TranslatorFatalError
 from modpack_translator.pipeline.translator import build_translator
 
@@ -265,6 +266,9 @@ class TranslateWorker(QThread):
                         self.pair_progress.emit(total_pairs_done)
                         _last_emit_t[0] = now
 
+                # 蒐集本輪成功處理的伺服器端格式目標，供結尾寫入同步 manifest
+                synced_ok: list[TranslationTarget] = []
+
                 for i, target in enumerate(self._targets):
                     if self._cancel:
                         self.log.emit("已由使用者取消翻譯。")
@@ -286,6 +290,8 @@ class TranslateWorker(QThread):
                         # total_pairs_done 已由 _on_pair_done 累加，不再重複計算
                         if failed:
                             failed_by_target[failed_target_name(target)] = failed
+                        if sync_mod.is_server_side(target.format):
+                            synced_ok.append(target)
                     except TranslatorFatalError:
                         raise
                     except Exception as exc:
@@ -299,6 +305,17 @@ class TranslateWorker(QThread):
                         self.log.emit(f"進度已儲存（{i + 1}/{total} 個檔案）…")
 
                 _flush_cache(cache_path, cache)
+
+                # 增量寫入伺服器同步清單：本輪成功的伺服器端格式目標合併進
+                # game_root/.modpack_translator/sync_manifest.json（供之後同步至伺服器實例）；
+                # 掛鉤失敗不可影響翻譯結果
+                try:
+                    entries = sync_mod.build_manifest_from_targets(synced_ok, game_root)
+                    if entries:
+                        sync_mod.merge_manifest(game_root, entries)
+                        self.log.emit(f"已更新伺服器同步清單（{len(entries)} 個伺服器端檔）。")
+                except Exception as exc:  # noqa: BLE001 — manifest 失敗不可影響翻譯
+                    self.log.emit(f"[警告] 同步清單更新失敗（不影響翻譯）：{exc}")
 
                 # 建立/更新 hash→英文 對照表（translation_sources.json，與快取同 key）
                 try:
