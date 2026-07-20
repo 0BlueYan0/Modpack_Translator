@@ -27,7 +27,11 @@ _PLACEHOLDERS = re.compile(
     r'|(?<=\])\([^()\s]+\)'
     # 行內 JSX/HTML 標籤(含屬性,GuideME <ItemLink id=… />、<Color color=…>、</Color>):
     # 標籤名+屬性整段凍結,標籤「之間」的內文仍可翻。無空白的 <token> 由下方既有模式涵蓋。
-    r'|</?[A-Za-z][A-Za-z0-9]*(?:\s[^<>]*)?/?>'
+    # 真標籤必有 = 屬性、自閉合 /> 或閉合 </X> 形態——含空白的多詞散文
+    # (nightfall_invade boss 名 "<Flame Lord>")是裝飾括號,不得整段凍結。
+    r'|</[A-Za-z][A-Za-z0-9]*\s*>'                # 閉合標籤 </Color>
+    r'|<[A-Za-z][A-Za-z0-9]*(?:\s[^<>]*)?/>'      # 自閉合 <ItemLink id=… />、<br/>
+    r'|<[A-Za-z][A-Za-z0-9]*\s[^<>]*=[^<>]*>'     # 帶屬性開標籤 <Color color=…>
     r'|\\?@[A-Z][A-Z0-9_]*@'                # legacy guide markers: @L@, \@L@, @PAGE@
     r'|\\n'                                 # escaped newline literal
     r'|\\&'                                 # escaped ampersand
@@ -579,8 +583,10 @@ def _is_copy_only_key_value(key: str, value: str) -> bool:
         return True
     if key.startswith(("chapter.", "chapter_group.")) and key.endswith(".title") and _looks_like_brand_name(text):
         return True
-    if text.lower().startswith("the ") and _value_slug_in_key(key, text[4:]):
-        return True
+    # 「The X」且 slug 出現在鍵中（entity.x.the_nightwarden = "The Nightwarden"）
+    # 曾整類視為專有名詞原樣保留——Soulrend 實包量測 290 筆命中幾乎全是
+    # 該翻的內容顯示名（boss/物品/次元/畫作/成就，含 The Nether），
+    # 真中繼鍵（itemgroup./署名/連結）另有專屬規則涵蓋，此規則已移除。
     return False
 
 
@@ -1043,12 +1049,22 @@ def diff_keys(
 
 def parse_json_lang(raw: str) -> dict[str, str]:
     """解析 lang JSON。遊戲以 GSON lenient 讀 lang 檔，// 註解、尾逗號、
-    \\' 這類非法跳脫都讀得動（ba_bt、libertyvillagers 實際出貨如此）；
-    嚴格解析失敗就修復後重試，否則整個 mod 會被靜默跳過不翻。"""
+    \\' 非法跳脫、字串內原始換行都讀得動（ba_bt、libertyvillagers、
+    ShoulderSurfing 實際出貨如此）；嚴格解析失敗就修復後重試，否則整個
+    mod 會被靜默跳過不翻。修復後仍讀不動的（medieval_paintings 無外層
+    大括號、justlevelingfork 檔案截斷、spawn 缺逗號——連 GSON 都拒收，
+    玩家只看得到 raw key），走搶救式抽取：譯檔輸出是合法 JSON，遊戲
+    讀 zh_tw 反而能正常顯示，能救多少是多少。"""
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        data = json.loads(_lenient_json_repair(raw))
+        try:
+            data = json.loads(_lenient_json_repair(raw))
+        except json.JSONDecodeError:
+            salvaged = _salvage_flat_lang_pairs(raw)
+            if not salvaged:
+                raise
+            return salvaged
     if not isinstance(data, dict):
         return {}
     return {k: v for k, v in data.items() if isinstance(v, str)}
@@ -1057,10 +1073,14 @@ def parse_json_lang(raw: str) -> dict[str, str]:
 _VALID_JSON_ESCAPES = '"\\/bfnrtu'
 
 
+_CTRL_ESCAPES = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
+
+
 def _lenient_json_repair(raw: str) -> str:
     """把 GSON lenient 接受的寫法修成嚴格 JSON：字串外去 //、/* */ 註解與
-    尾逗號；字串內的非法跳脫（\\'）去掉反斜線。單一逐字元掃描，字串邊界
-    以未跳脫的雙引號判定，內容一律原樣保留。"""
+    尾逗號；字串內的非法跳脫（\\'）去掉反斜線、原始控制字元轉成合法跳脫
+    （GSON 對字串內未跳脫的換行/Tab 照收，ShoulderSurfing、ParticleEffects
+    實際出貨如此）。單一逐字元掃描，字串邊界以未跳脫的雙引號判定。"""
     out: list[str] = []
     i, n = 0, len(raw)
     in_str = False
@@ -1075,6 +1095,10 @@ def _lenient_json_repair(raw: str) -> str:
                 else:
                     out.append(nxt)  # GSON lenient：非法跳脫視為字元本身
                 i += 2
+                continue
+            if ch < " ":
+                out.append(_CTRL_ESCAPES.get(ch) or f"\\u{ord(ch):04x}")
+                i += 1
                 continue
             if ch == '"':
                 in_str = False
@@ -1145,6 +1169,71 @@ def _strip_trailing_commas(raw: str) -> str:
         out.append(ch)
         i += 1
     return "".join(out)
+
+
+def _salvage_flat_lang_pairs(raw: str) -> dict[str, str]:
+    """最後手段：從結構壞掉的 lang 檔（無外層大括號、截斷、缺逗號、字串
+    中途斷裂）抽出所有仍完整的 "key": "value" 對。這些檔連遊戲的 GSON 都
+    讀不動（玩家只看得到 raw key），救回幾對就多顯示幾條譯文。鍵內含換行
+    視為斷裂區的誤配對，丟棄該對後從原地繼續重新對齊。"""
+    pairs: dict[str, str] = {}
+    i, n = 0, len(raw)
+    while i < n:
+        if raw[i] != '"':
+            i += 1
+            continue
+        key, i = _read_json_ish_string(raw, i + 1)
+        if key is None:
+            continue
+        j = i
+        while j < n and raw[j] in " \t\r\n":
+            j += 1
+        if j >= n or raw[j] != ":":
+            continue  # 這個字串不是鍵；從其後繼續掃
+        j += 1
+        while j < n and raw[j] in " \t\r\n":
+            j += 1
+        if j >= n or raw[j] != '"':
+            i = j  # 非字串值（數字/物件/truncated）：跳過此對
+            continue
+        value, k = _read_json_ish_string(raw, j + 1)
+        i = k
+        if value is None:
+            continue  # 值字串沒收尾（截斷點）：丟棄
+        if "\n" in key or "\r" in key:
+            continue  # 鍵跨行＝斷裂區誤配對
+        pairs[key] = value
+    return pairs
+
+
+_SALVAGE_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f"}
+
+
+def _read_json_ish_string(raw: str, i: int) -> tuple[str | None, int]:
+    """讀一個 JSON 風格字串（起始引號之後），容忍原始控制字元與非法跳脫
+    （GSON lenient 行為）。回傳 (解碼內容, 收尾引號後索引)；無收尾引號
+    （檔案截斷）回傳 (None, 檔尾)。"""
+    out: list[str] = []
+    n = len(raw)
+    while i < n:
+        ch = raw[i]
+        if ch == '"':
+            return "".join(out), i + 1
+        if ch == "\\" and i + 1 < n:
+            nxt = raw[i + 1]
+            if nxt == "u" and i + 5 < n:
+                try:
+                    out.append(chr(int(raw[i + 2:i + 6], 16)))
+                    i += 6
+                    continue
+                except ValueError:
+                    pass
+            out.append(_SALVAGE_ESCAPES.get(nxt, nxt))
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+    return None, n
 
 
 def parse_legacy_lang(raw: str) -> dict[str, str]:
@@ -1544,11 +1633,58 @@ _INLINE_FIELD_RE = re.compile(
     r'(?P<prefix>\b(?P<field>title|subtitle|description|text|hover|name)\s*:\s*)"(?P<value>(?:[^"\\]|\\.)*)"',
     re.IGNORECASE,
 )
+# 只匹配陣列開頭;陣列結尾由 _scan_snbt_array_end 以引號感知的深度掃描定位。
+# 非貪婪 .*?\] 會被字串值內的 ]（FTBQ 按鍵提示 "[O]"、"[Middle-Button]"）
+# 提早終止,同陣列後續的整段英文句子全部漏抽(the_realms.snbt 實例)。
 _INLINE_ARRAY_FIELD_RE = re.compile(
-    r'\b(?P<field>title|subtitle|description|text|hover|name)\s*:\s*\[(?P<body>.*?)\]',
-    re.IGNORECASE | re.DOTALL,
+    r'\b(?P<field>title|subtitle|description|text|hover|name)\s*:\s*\[',
+    re.IGNORECASE,
 )
 _STRING_LITERAL_RE = re.compile(r'"(?P<value>(?:[^"\\]|\\.)*)"')
+
+
+def _scan_snbt_array_end(raw: str, start: int) -> int:
+    """從 [ 之後掃到對應的 ]（引號感知、支援巢狀），回傳 ] 的索引；
+    未閉合（檔案截斷）回傳檔尾。"""
+    depth = 1
+    i, n = start, len(raw)
+    in_str = False
+    while i < n:
+        ch = raw[i]
+        if in_str:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return n
+
+
+def _component_inner_text(value: str) -> str | None:
+    """字串化 JSON 元件行（"{\\"text\\":\\"...\\",\\"align\\":\\"center\\"}"，
+    dragonslayer.snbt 圖說實例）→ 回傳可譯的 text 欄位；非元件（snbt
+    {image:...} 標記等 JSON 解析不動的）回傳 None。"""
+    if not value.startswith("{"):
+        return None
+    try:
+        obj = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    text = obj.get("text")
+    if isinstance(text, str) and text.strip():
+        return text
+    return None
 
 
 def read_inline_snbt_text(source_file: Path) -> dict[str, str]:
@@ -1570,7 +1706,14 @@ def replace_inline_snbt_text(raw: str, translations: dict[str, str]) -> str:
             continue
 
         pieces.append(raw[last:start])
-        pieces.append(_json_escape(translations[key]))
+        original = _json_unescape(raw[start:end])
+        if _component_inner_text(original) is not None:
+            # 元件行：只換 text 欄位，重組整行（align 等其餘欄位保留）
+            obj = json.loads(original)
+            obj["text"] = translations[key]
+            pieces.append(_json_escape(json.dumps(obj, ensure_ascii=False)))
+        else:
+            pieces.append(_json_escape(translations[key]))
         last = end
 
     if not pieces:
@@ -1592,15 +1735,20 @@ def _iter_inline_snbt_text_matches(raw: str) -> list[tuple[str, int, int, str]]:
         ))
 
     for array_match in _INLINE_ARRAY_FIELD_RE.finditer(raw):
-        body = array_match.group("body")
-        offset = array_match.start("body")
+        body_start = array_match.end()
+        body_end = _scan_snbt_array_end(raw, body_start)
+        body = raw[body_start:body_end]
         field = array_match.group("field").lower()
         for string_match in _STRING_LITERAL_RE.finditer(body):
+            value = _json_unescape(string_match.group("value"))
+            # 字串化 JSON 元件行：可譯目標是其 text 欄位（讀寫兩側以
+            # 相同判定重推導,translations 以 idx 對齊,寫回時重組整行）
+            inner = _component_inner_text(value)
             matches.append((
                 field,
-                offset + string_match.start("value"),
-                offset + string_match.end("value"),
-                _json_unescape(string_match.group("value")),
+                body_start + string_match.start("value"),
+                body_start + string_match.end("value"),
+                inner if inner is not None else value,
             ))
 
     matches.sort(key=lambda item: item[1])
@@ -1617,8 +1765,13 @@ def _is_translatable_inline_text(value: str) -> bool:
         return False
     if re.fullmatch(r"[a-z0-9_.:/#\-]+", text, re.IGNORECASE):
         return False
-    if text.startswith(("{", "[", "$(", "#")):
+    if text.startswith(("{", "$(", "#")):
         return False
+    if text.startswith("["):
+        # \u6574\u503c\u662f\u591a\u8a5e\u65b9\u62ec\u865f\u6a19\u984c\uff08"[Read Me]"\uff09\u8981\u7ffb\uff1b\u55ae token \u9375\u63d0\u793a
+        # \uff08"[shift]"\u3001"[O]"\uff09\u8207\u5176\u4ed6 [ \u958b\u982d\u7d50\u69cb\u503c\u7dad\u6301\u4e0d\u7ffb
+        if not (re.fullmatch(r"\[[^\[\]]+\]", text) and " " in text):
+            return False
     if "://" in text:
         return False
     if re.search(r"[\u3400-\u9fff]", text):

@@ -85,6 +85,7 @@ _FMT_NAME_MAP: dict[str, str] = {
     "rct_names":            "RCT 訓練家名稱",
     "vh_config_json":       "Vault Hunters 設定文字",
     "citadel_book_txt":     "Citadel 圖鑑書內文 (txt)",
+    "datapack_json":        "資料包字面文字 (技能樹/起源)",
 }
 
 

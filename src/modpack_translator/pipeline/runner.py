@@ -7,7 +7,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from modpack_translator.pipeline import citadel, mdx, rct, vh
+from modpack_translator.pipeline import citadel, datapack, mdx, rct, vh
 from modpack_translator.pipeline.patcher import (
     read_jar_json_file,
     read_jar_json_lang,
@@ -435,6 +435,8 @@ def read_target_strings(target: TranslationTarget) -> dict[str, str]:
         return read_patchouli_text(_read_patchouli_source(target))
     elif target.format == "vh_config_json":
         return vh.read_source_text(target.source_file)
+    elif target.format == "datapack_json":
+        return datapack.read_source_text(target.source_file)
     elif target.format in ("ftbq_snbt", "heracles_snbt"):
         return read_snbt_lang(target.source_file)
     elif target.format in ("ftbq_inline_snbt", "heracles_inline_snbt"):
@@ -550,6 +552,9 @@ def process_target(
 
     if target.format == "vh_config_json":
         return _process_vh_config(target, translator, cache, retry_count, cancel_check, on_pair_done)
+
+    if target.format == "datapack_json":
+        return _process_datapack(target, translator, cache, retry_count, cancel_check, on_pair_done)
 
     if target.format == "json_lang":
         en_dict = read_json_lang(target.source_file, target.path_in_jar)
@@ -777,6 +782,75 @@ def _process_vh_config(
 
     target_missing = not target.target_file.exists()
     if changed or (target_missing and bool(existing_data)):
+        _write_local_json(target.target_file, data)
+
+    return n_translated, n_cached, n_fallback, failed
+
+
+def _process_datapack(
+    target: TranslationTarget,
+    translator: Any,
+    cache: dict[str, str],
+    retry_count: int = 0,
+    cancel_check=None,
+    on_pair_done=None,
+) -> tuple[int, int, int, dict[str, str]]:
+    """資料包字面 JSON（技能樹節點/起源）：無 locale 變體,就地覆蓋來源檔。
+    來源即目標,已含 CJK 的欄位視為完成、只補譯仍是英文字面的欄位;結構
+    其餘部分原樣保留。冪等:再次執行時值皆 CJK → pending 為空 → 不重寫。"""
+    spec = datapack._spec_for_source(target.source_file)
+    if spec is None:
+        return 0, 0, 0, {}
+    if target.target_file is None:
+        raise ValueError(f"Missing target file for {target.source_file}")
+
+    glossary = getattr(translator, "glossary", None)
+    pack_context = getattr(translator, "pack_context", None)
+    source_data = json.loads(target.source_file.read_text(encoding="utf-8-sig"))
+    if not isinstance(source_data, dict):
+        return 0, 0, 0, {}
+
+    source_strings = datapack.extract_text(source_data, spec)
+    to_translate = datapack.pending_english_keys(source_strings, glossary=glossary)
+    if not to_translate:
+        return 0, 0, 0, {}
+
+    data = deepcopy(source_data)
+    translations: dict[str, str] = {}
+    failed: dict[str, str] = {}
+    n_translated = n_cached = n_fallback = 0
+
+    for path_key, src in to_translate.items():
+        if cancel_check is not None and cancel_check():
+            break
+        ck = cache_key(src)
+        if ck in cache and is_usable_translation(
+            src, cache[ck], accept_identical_proper_noun=True, glossary=glossary
+        ):
+            value = _enforce_glossary(glossary, src, cache[ck])
+            if value != cache[ck]:
+                cache[ck] = value
+            translations[path_key] = value
+            n_cached += 1
+            if on_pair_done is not None:
+                on_pair_done(1)
+            continue
+        cache.pop(ck, None)
+        final, ok = _translate_segmented_text(translator, src, retry_count, cancel_check)
+        if ok:
+            translations[path_key] = final
+            cache[ck] = final
+            n_translated += 1
+            if pack_context is not None:
+                pack_context.maybe_record(src, final, glossary)
+        else:
+            failed[path_key] = src
+            n_fallback += 1
+        if on_pair_done is not None:
+            on_pair_done(1)
+
+    if translations:
+        datapack.apply_text(data, translations)
         _write_local_json(target.target_file, data)
 
     return n_translated, n_cached, n_fallback, failed

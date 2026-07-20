@@ -81,3 +81,51 @@ def test_short_or_vowelless_acronyms_still_skipped():
     assert classify_translation_entry("entity.the_vault.plastic_villager_tank", "NPV") != "translate"
     assert classify_translation_entry("some.mod.https_label", "HTTPS") != "translate"
     assert classify_translation_entry("objective.the_vault.pvp", "PvP") != "translate"
+
+
+# ── 3. Soulrend 實包誤殺（v1.13.0）───────────────────────────────────
+# 「The X」內容名（boss/物品/次元/畫作，值 slug 出現在鍵中）被
+# value-slug-in-key 規則誤殺——實測全實例 290 筆命中幾乎全是該翻的
+# 顯示名（The Nightwarden、The Nether、畫作標題），真中繼鍵
+# （itemgroup./署名）另有專屬規則涵蓋，整條移除。
+
+def test_the_prefixed_content_names_translate():
+    assert classify_translation_entry(
+        "entity.traveloptics.the_nightwarden", "The Nightwarden"
+    ) == "translate"
+    assert classify_translation_entry(
+        "item.traveloptics.the_obliterator", "The Obliterator"
+    ) == "translate"
+    assert classify_translation_entry(
+        "dimension.minecraft.the_nether", "The Nether"
+    ) == "translate"
+    assert classify_translation_entry(
+        "painting.medieval_paintings.the_two_riders_of_the_south.title",
+        "The Two Riders of the South",
+    ) == "translate"
+
+
+def test_itemgroup_mod_names_still_copied():
+    assert classify_translation_entry("itemGroup.outer_end", "The Outer End") == "copy"
+    assert classify_translation_entry(
+        "itemGroup.graveyard.group", "The Graveyard"
+    ) == "copy"
+
+
+# ── 4. 角括號裝飾 boss 名（v1.13.0）──────────────────────────────────
+# nightfall_invade 困難模式 boss 名 "<Flame Lord>" 整值被行內 JSX 標籤
+# 規則凍結成無可譯字。真標籤必有 = 屬性、自閉合 /> 或閉合 </X> 形態；
+# 含空白的多詞散文不再整段凍結。
+
+def test_angle_bracketed_display_names_translate():
+    assert classify_translation_entry(
+        "boss_bar.nightfall_invade.arterius_hard", "<Flame Lord>"
+    ) == "translate"
+    assert classify_translation_entry(
+        "entity.nightfall_invade.arterius_hard", "<Lord Of Flame - Arterius>"
+    ) == "translate"
+
+
+def test_single_token_placeholders_still_skipped():
+    assert classify_translation_entry("commands.foo.usage", "<amount>") == "skip"
+    assert classify_translation_entry("commands.foo.usage2", "<player|playerUuid>") == "skip"

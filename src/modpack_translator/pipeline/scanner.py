@@ -6,7 +6,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from modpack_translator.pipeline import citadel, mdx, rct, vh
+from modpack_translator.pipeline import citadel, datapack, mdx, rct, vh
 from modpack_translator.pipeline.preprocessor import (
     diff_keys,
     parse_json_lang,
@@ -22,7 +22,7 @@ class TranslationTarget:
     source_file: Path
     path_in_jar: str | None
     mod_id: str
-    format: str       # json_lang | legacy_lang | patchouli_json | ftbq_snbt | ftbq_inline_snbt | heracles_snbt | heracles_inline_snbt | bq_lang | kubejs_json | pack_json_lang | pack_legacy_lang | oracle_mdx | oracle_meta | guideme_md | rct_names | citadel_book_txt | vh_config_json
+    format: str       # json_lang | legacy_lang | patchouli_json | ftbq_snbt | ftbq_inline_snbt | heracles_snbt | heracles_inline_snbt | bq_lang | kubejs_json | pack_json_lang | pack_legacy_lang | oracle_mdx | oracle_meta | guideme_md | rct_names | citadel_book_txt | vh_config_json | datapack_json
     output_mode: str  # jar_inject | in_place
     output_lang_code: str = "zh_tw"
     target_path_in_jar: str | None = None      # 寫入目標:一律正規小寫（遊戲讀得到）
@@ -74,6 +74,8 @@ class ModpackScanner:
             targets.extend(self._scan_rct_local(root, lang_code, glossary))
             targets.extend(self._scan_root_patchouli_books(root, lang_code, glossary))
             targets.extend(self._scan_vault_config(root, lang_code, glossary))
+            targets.extend(self._scan_datapack_literals(root, lang_code, glossary))
+            targets.extend(self._scan_shaderpacks(root, lang_code, glossary))
 
             return targets
         finally:
@@ -960,6 +962,147 @@ class ModpackScanner:
             except (OSError, UnicodeDecodeError, json.JSONDecodeError):
                 existing = {}
         return bool(diff_keys(source, existing, glossary=glossary))
+
+    # ---------------------------------------------------- 光影包 shader lang
+
+    def _scan_shaderpacks(self, modpack_path: Path, lang_code: str, glossary=None) -> list[TranslationTarget]:
+        """Iris/Oculus 光影包的 shader 設定 GUI 文字在 shaders/lang/<locale>.lang
+        （OptiFine 慣例的舊式 key=value）。Iris 讀取時把檔名小寫化推導語言碼
+        （同一包內 en_US.lang 與 pt_br.lang 大小寫混用仍運作即證），故譯檔一律
+        寫小寫 zh_tw.lang。zip 包走 jar 注入、資料夾包就地寫檔。"""
+        shaderpacks_dir = modpack_path / "shaderpacks"
+        if not shaderpacks_dir.is_dir():
+            return []
+        targets: list[TranslationTarget] = []
+        for child in sorted(shaderpacks_dir.iterdir()):
+            if child.is_file() and child.suffix.lower() == ".zip":
+                targets.extend(self._scan_shaderpack_zip(child, lang_code, glossary))
+            elif child.is_dir() and (child / "shaders" / "lang").is_dir():
+                targets.extend(self._scan_shaderpack_folder(child, lang_code, glossary))
+        return targets
+
+    def _scan_shaderpack_zip(self, zip_path: Path, lang_code: str, glossary=None) -> list[TranslationTarget]:
+        targets: list[TranslationTarget] = []
+        try:
+            with zipfile.ZipFile(zip_path) as zf:
+                name_set = set(zf.namelist())
+                for name in sorted(name_set):
+                    if not self._is_shader_source_lang(name):
+                        continue
+                    write_path = self._canonical_lang_path(name, lang_code)
+                    existing_path = self._existing_lang_path(name, lang_code, name_set)
+                    needs = self._jar_lang_needs_translation(zf, name, existing_path, "lang", glossary)
+                    if not (needs or self._needs_case_migration(existing_path, write_path, name_set)):
+                        continue
+                    targets.append(TranslationTarget(
+                        source_file=zip_path,
+                        path_in_jar=name,
+                        mod_id=zip_path.stem,
+                        format="legacy_lang",
+                        output_mode="jar_inject",
+                        output_lang_code=lang_code,
+                        target_path_in_jar=write_path,
+                        existing_path_in_jar=existing_path,
+                    ))
+        except (zipfile.BadZipFile, OSError):
+            pass
+        return targets
+
+    def _scan_shaderpack_folder(self, pack_dir: Path, lang_code: str, glossary=None) -> list[TranslationTarget]:
+        lang_dir = pack_dir / "shaders" / "lang"
+        targets: list[TranslationTarget] = []
+        for lang_file in sorted(lang_dir.glob("*.lang")):
+            if not self._is_source_locale_name(lang_file.stem, lang_code):
+                continue
+            existing_file = self._existing_flat_locale_file(lang_file, lang_code)
+            write_file = self._canonical_flat_locale_file(lang_file, lang_code)
+            needs = self._scan_file_has_pending_text(lang_file, existing_file, parse_legacy_lang, glossary)
+            if not (needs or self._needs_local_migration(existing_file, write_file)):
+                continue
+            targets.append(TranslationTarget(
+                source_file=lang_file,
+                path_in_jar=None,
+                mod_id=pack_dir.name,
+                format="pack_legacy_lang",
+                output_mode="in_place",
+                output_lang_code=lang_code,
+                target_file=write_file,
+                existing_file=existing_file,
+            ))
+        return targets
+
+    def _is_shader_source_lang(self, name: str) -> bool:
+        """shaders/lang/<en>.lang 的英文來源檔（大小寫寬容）。"""
+        parts = name.split("/")
+        if len(parts) < 3 or parts[-3] != "shaders" or parts[-2] != "lang":
+            return False
+        if not name.lower().endswith(".lang"):
+            return False
+        if "__macosx" in name.lower():
+            return False
+        return self._is_source_locale_name(Path(parts[-1]).stem, "zh_tw")
+
+    # ------------------------------------------ 資料包字面 JSON（技能樹/起源）
+
+    # 資料包來源:kubejs/data(modpack 自加)與 config/paxi/datapacks/<pack>/data
+    # （Paxi 執行期載入的資料包,SkillTree 技能節點、Origins 起源多在此）。
+    _DATAPACK_DATA_ROOTS = (
+        ("kubejs", "data"),
+        ("config", "paxi", "datapacks"),
+    )
+
+    def _scan_datapack_literals(self, modpack_path: Path, lang_code: str, glossary=None) -> list[TranslationTarget]:
+        """字面寫死在資料包 JSON 的顯示文字(PassiveSkillTree 節點 title/
+        description、Origins 起源 name/description)。無 locale 覆蓋機制,
+        就地把英文字面翻成中文;值已含 CJK 則跳過,冪等。"""
+        targets: list[TranslationTarget] = []
+        for rel in self._DATAPACK_DATA_ROOTS:
+            base = modpack_path.joinpath(*rel)
+            if not base.is_dir():
+                continue
+            if rel[-1] == "datapacks":
+                # 每個子資料包（資料夾或 zip）各有自己的 data/ 樹；zip 型
+                # 資料包內的字面 JSON 罕見,先只掃資料夾型（實例即資料夾型）
+                data_dirs = [child / "data" for child in sorted(base.iterdir())
+                             if child.is_dir() and (child / "data").is_dir()]
+            else:
+                data_dirs = [base]
+            for data_dir in data_dirs:
+                targets.extend(self._scan_datapack_data_dir(data_dir, lang_code, glossary))
+        return targets
+
+    def _scan_datapack_data_dir(self, data_dir: Path, lang_code: str, glossary=None) -> list[TranslationTarget]:
+        targets: list[TranslationTarget] = []
+        for json_file in sorted(data_dir.rglob("*.json")):
+            rel_parts = ("data",) + json_file.relative_to(data_dir).parts
+            spec = datapack.spec_for_path(rel_parts)
+            if spec is None:
+                continue
+            if not self._datapack_needs_translation(json_file, glossary):
+                continue
+            targets.append(TranslationTarget(
+                source_file=json_file,
+                path_in_jar=None,
+                mod_id=rel_parts[1] if len(rel_parts) > 1 else "datapack",
+                format="datapack_json",
+                output_mode="in_place",
+                output_lang_code=lang_code,
+                target_file=json_file,  # 無 locale 變體:就地改寫
+            ))
+        return targets
+
+    def _datapack_needs_translation(self, json_file: Path, glossary=None) -> bool:
+        if getattr(self, "_include_translated", False):
+            return True
+        try:
+            source = datapack.read_source_text(json_file)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return False
+        if not source:
+            return False
+        # 就地覆蓋:來源即目標,翻譯後值含 CJK。以「仍是英文字面且可譯」為
+        # 待翻閘門（diff 空字典會把已翻中文也當缺譯,不能用）。
+        return bool(datapack.pending_english_keys(source, glossary=glossary))
 
     # --------------------------------------------------------------- FTB Quests
 
