@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from modpack_translator.pipeline import citadel, datapack, mdx, rct, vh
+from modpack_translator.pipeline import patcher as patcher_mod
 from modpack_translator.pipeline.patcher import (
     read_jar_json_file,
     read_jar_json_lang,
@@ -435,6 +436,12 @@ def read_target_strings(target: TranslationTarget) -> dict[str, str]:
         return read_patchouli_text(_read_patchouli_source(target))
     elif target.format == "vh_config_json":
         return vh.read_source_text(target.source_file)
+    elif target.format == "vh_class_literals":
+        return {
+            f"{cls}::{lit}": _protect_concat_slots(lit)
+            for cls, lits in patcher_mod.extract_vault_ui_literals(target.source_file).items()
+            for lit in lits
+        }
     elif target.format == "datapack_json":
         return datapack.read_source_text(target.source_file)
     elif target.format in ("ftbq_snbt", "heracles_snbt"):
@@ -552,6 +559,9 @@ def process_target(
 
     if target.format == "vh_config_json":
         return _process_vh_config(target, translator, cache, retry_count, cancel_check, on_pair_done)
+
+    if target.format == "vh_class_literals":
+        return _process_vh_class_literals(target, translator, cache, retry_count, cancel_check, on_pair_done)
 
     if target.format == "datapack_json":
         return _process_datapack(target, translator, cache, retry_count, cancel_check, on_pair_done)
@@ -786,6 +796,93 @@ def _process_vh_config(
     if changed or (target_missing and bool(existing_data)):
         _write_local_json(target.target_file, data)
 
+    return n_translated, n_cached, n_fallback, failed
+
+
+def _protect_concat_slots(text: str) -> str:
+    """把 invokedynamic 字串串接槽位 \\x01 換成 {N} 佔位符供翻譯管線保護。"""
+    parts = text.split("\x01")
+    out = [parts[0]]
+    for i, part in enumerate(parts[1:]):
+        out.append(f"{{{i}}}")
+        out.append(part)
+    return "".join(out)
+
+
+def _restore_concat_slots(text: str, n_slots: int) -> str | None:
+    """把 {N} 佔位符還原為 \\x01。每個 {i} 必須恰出現一次（槽位皆等值，
+    順序無妨）；遺失/重複視為翻譯失敗回傳 None。"""
+    for i in range(n_slots):
+        token = f"{{{i}}}"
+        if text.count(token) != 1:
+            return None
+        text = text.replace(token, "\x01")
+    return text
+
+
+def _process_vh_class_literals(
+    target: TranslationTarget,
+    translator: Any,
+    cache: dict[str, str],
+    retry_count: int = 0,
+    cancel_check=None,
+    on_pair_done=None,
+) -> tuple[int, int, int, dict[str, str]]:
+    """the_vault 硬編碼 UI 字面值：抽常數池待翻字串 → 翻譯（\\x01 槽位以
+    {N} 保護）→ patcher 改寫 class 常數池。已翻字串含 CJK 不再被抽出 →
+    冪等；人工白名單另由 plan_vault_class_patch 處理。"""
+    glossary = getattr(translator, "glossary", None)
+    pack_context = getattr(translator, "pack_context", None)
+    pending = patcher_mod.extract_vault_ui_literals(target.source_file)
+    mapping: dict[str, dict[str, str]] = {}
+    failed: dict[str, str] = {}
+    n_translated = n_cached = n_fallback = 0
+    cancelled = False
+    for cls, literals in pending.items():
+        if cancelled:
+            break
+        for lit in literals:
+            if cancel_check is not None and cancel_check():
+                cancelled = True
+                break
+            n_slots = lit.count("\x01")
+            src = _protect_concat_slots(lit)
+            ck = cache_key(src)
+            if ck in cache and is_usable_translation(src, cache[ck], glossary=glossary):
+                value = _enforce_glossary(glossary, src, cache[ck])
+                if value != cache[ck]:
+                    cache[ck] = value
+                counted = "cached"
+            else:
+                cache.pop(ck, None)
+                value, ok = _translate_segmented_text(translator, src, retry_count, cancel_check)
+                if not ok:
+                    failed[f"{cls}::{lit}"] = src
+                    n_fallback += 1
+                    if on_pair_done is not None:
+                        on_pair_done(1)
+                    continue
+                counted = "translated"
+            restored = _restore_concat_slots(value, n_slots)
+            if restored is None or "\x00" in restored or any(ord(c) > 0xFFFF for c in restored):
+                # 串接槽位遺失或超出 modified UTF-8 可表示範圍
+                failed[f"{cls}::{lit}"] = src
+                n_fallback += 1
+                if on_pair_done is not None:
+                    on_pair_done(1)
+                continue
+            if counted == "translated":
+                cache[ck] = value
+                n_translated += 1
+                if pack_context is not None:
+                    pack_context.maybe_record(src, value, glossary)
+            else:
+                n_cached += 1
+            mapping.setdefault(cls, {})[lit] = restored
+            if on_pair_done is not None:
+                on_pair_done(1)
+    if mapping:
+        patcher_mod.patch_vault_literal_map(target.source_file, mapping)
     return n_translated, n_cached, n_fallback, failed
 
 

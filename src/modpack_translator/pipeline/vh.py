@@ -252,6 +252,20 @@ HARDCODED_UI_LITERALS: dict[str, dict[str, str]] = {
     "iskallia/vault/client/gui/screen/custom/TabbedScreen.class": {
         "Back": "返回",
     },
+    # 任務書（Quest Overview，非 FTBQ）畫面框架
+    "iskallia/vault/client/gui/screen/quest/QuestOverviewElementScreen.class": {
+        "Quest Overview": "任務總覽",
+        "Complete": "完成",
+        "Completed": "已完成",
+        "Incomplete": "未完成",
+        "Locked": "已鎖定",
+    },
+    "iskallia/vault/client/gui/screen/quest/QuestDisplayContainer.class": {
+        "Description:": "描述：",
+        "Reward:": "獎勵：",
+        " Skill Point": " 技能點",
+        " Skill Points": " 技能點",
+    },
 }
 
 

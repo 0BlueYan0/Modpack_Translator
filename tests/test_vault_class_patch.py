@@ -12,8 +12,16 @@ from modpack_translator.pipeline.patcher import (
     _parse_constant_pool,
     _replace_class_string_literals,
     apply_vault_class_patch,
+    extract_vault_ui_literals,
+    patch_vault_literal_map,
     plan_vault_class_patch,
 )
+from modpack_translator.pipeline.runner import (
+    _protect_concat_slots,
+    _restore_concat_slots,
+    process_target,
+)
+from modpack_translator.pipeline.scanner import ModpackScanner
 
 
 # ── 合成最小 class 檔 ────────────────────────────────────────────────────
@@ -150,3 +158,92 @@ def test_real_literals_are_bmp_safe():
         for value in mapping.values():
             for ch in value:
                 assert ch != "\x00" and ord(ch) <= 0xFFFF
+
+
+# ── 自動字面值翻譯（vh_class_literals） ──────────────────────────────────
+
+_SCREEN_CLS = "iskallia/vault/client/gui/screen/summary/VaultEndScreen.class"
+
+
+def _screen_class() -> bytes:
+    # 顯示文句（多詞）/ 單詞 / 識別字引用 / 串接槽位 各一
+    return _class_file(
+        _utf8("Claim Rewards"), _string(1),
+        _utf8("Done"), _string(3),                       # 單詞：不自動翻
+        _utf8("SMALL"), _string(5), _utf8("()V"), _name_and_type(5, 7),
+        _utf8("Total: \x01"), _string(9),
+    )
+
+
+class _Dict:
+    glossary = None
+
+    def __init__(self, mapping):
+        self.mapping = mapping
+
+    def translate(self, text, cancel_check=None):
+        return self.mapping.get(text.strip(), text)
+
+
+def test_slot_protect_restore_roundtrip():
+    assert _protect_concat_slots("Total: \x01") == "Total: {0}"
+    assert _protect_concat_slots("Page \x01 of \x01") == "Page {0} of {1}"
+    assert _restore_concat_slots("第 {0} / {1} 頁", 2) == "第 \x01 / \x01 頁"
+    assert _restore_concat_slots("共 {0} 頁", 2) is None      # 佔位符遺失
+    assert _restore_concat_slots("{0}{0}", 1) is None          # 佔位符重複
+    assert _restore_concat_slots("無槽位", 0) == "無槽位"
+
+
+def test_extract_only_multiword_display_literals(tmp_path):
+    _make_jar(tmp_path, {_SCREEN_CLS: _screen_class()})
+    from modpack_translator.pipeline.patcher import find_vault_jar
+
+    jar = find_vault_jar(tmp_path)
+    literals = extract_vault_ui_literals(jar)
+    assert literals == {_SCREEN_CLS: ["Claim Rewards", "Total: \x01"]}
+
+
+def test_extract_skips_curated_whitelist(tmp_path):
+    tabbed = "iskallia/vault/client/gui/screen/custom/TabbedScreen.class"
+    # "Vault Hunters Options" 在白名單 → 不入自動清單
+    cls = "iskallia/vault/client/gui/screen/VaultOptionsScreen.class"
+    _make_jar(tmp_path, {cls: _class_file(_utf8("Vault Hunters Options"), _string(1))})
+    from modpack_translator.pipeline.patcher import find_vault_jar
+
+    assert extract_vault_ui_literals(find_vault_jar(tmp_path)) == {}
+
+
+def test_scan_and_process_vh_class_literals(tmp_path):
+    jar = _make_jar(tmp_path, {_SCREEN_CLS: _screen_class()})
+    targets = [
+        t for t in ModpackScanner().scan(tmp_path, "zh_tw")
+        if t.format == "vh_class_literals"
+    ]
+    assert len(targets) == 1 and targets[0].source_file == jar
+
+    translated, cached, fallback, failed = process_target(
+        targets[0],
+        _Dict({"Claim Rewards": "領取獎勵", "Total: {0}": "總計：{0}"}),
+        {}, "zh_tw",
+    )
+    assert (translated, fallback) == (2, 0) and not failed
+    with zipfile.ZipFile(jar) as zf:
+        utf8, srefs, _, _ = _parse_constant_pool(zf.read(_SCREEN_CLS))
+    texts = {utf8[i][1].decode("utf-8") for i in srefs}
+    assert "領取獎勵" in texts and "總計：\x01" in texts
+    assert "Done" in texts and "SMALL" in texts  # 單詞與識別字原樣
+    # 已翻 → 不再入列，冪等
+    assert extract_vault_ui_literals(jar) == {}
+    assert [
+        t for t in ModpackScanner().scan(tmp_path, "zh_tw")
+        if t.format == "vh_class_literals"
+    ] == []
+
+
+def test_patch_vault_literal_map_partial(tmp_path):
+    jar = _make_jar(tmp_path, {_SCREEN_CLS: _screen_class()})
+    n = patch_vault_literal_map(jar, {
+        _SCREEN_CLS: {"Claim Rewards": "領取獎勵"},
+        "iskallia/vault/missing.class": {"X Y": "不存在"},
+    })
+    assert n == 1

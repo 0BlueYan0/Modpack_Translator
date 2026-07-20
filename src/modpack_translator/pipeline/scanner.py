@@ -22,7 +22,7 @@ class TranslationTarget:
     source_file: Path
     path_in_jar: str | None
     mod_id: str
-    format: str       # json_lang | legacy_lang | patchouli_json | ftbq_snbt | ftbq_inline_snbt | heracles_snbt | heracles_inline_snbt | bq_lang | kubejs_json | pack_json_lang | pack_legacy_lang | oracle_mdx | oracle_meta | guideme_md | rct_names | citadel_book_txt | vh_config_json | datapack_json
+    format: str       # json_lang | legacy_lang | patchouli_json | ftbq_snbt | ftbq_inline_snbt | heracles_snbt | heracles_inline_snbt | bq_lang | kubejs_json | pack_json_lang | pack_legacy_lang | oracle_mdx | oracle_meta | guideme_md | rct_names | citadel_book_txt | vh_config_json | vh_class_literals | datapack_json
     output_mode: str  # jar_inject | in_place
     output_lang_code: str = "zh_tw"
     target_path_in_jar: str | None = None      # 寫入目標:一律正規小寫（遊戲讀得到）
@@ -74,6 +74,7 @@ class ModpackScanner:
             targets.extend(self._scan_rct_local(root, lang_code, glossary))
             targets.extend(self._scan_root_patchouli_books(root, lang_code, glossary))
             targets.extend(self._scan_vault_config(root, lang_code, glossary))
+            targets.extend(self._scan_vault_class_literals(root, lang_code))
             targets.extend(self._scan_datapack_literals(root, lang_code, glossary))
             targets.extend(self._scan_shaderpacks(root, lang_code, glossary))
 
@@ -961,6 +962,28 @@ class ModpackScanner:
                 existing_file=source,
             ))
         return targets
+
+    def _scan_vault_class_literals(self, modpack_path: Path, lang_code: str) -> list[TranslationTarget]:
+        """the_vault 選單/HUD/結算等畫面的硬編碼 UI 字面值（class 常數池，
+        lang/config 皆翻不到）。抽出「僅被 CONSTANT_String 引用的多詞顯示
+        文句」經翻譯管線譯後由 patcher 改寫常數池；已翻字串含 CJK 不再
+        入列 → 冪等。整個 jar 一個目標。"""
+        from modpack_translator.pipeline.patcher import extract_vault_ui_literals, find_vault_jar
+
+        jar = find_vault_jar(modpack_path)
+        if jar is None:
+            return []
+        pending = extract_vault_ui_literals(jar)
+        if not pending:
+            return []
+        return [TranslationTarget(
+            source_file=jar,
+            path_in_jar=None,
+            mod_id="the_vault",
+            format="vh_class_literals",
+            output_mode="jar_inject",
+            output_lang_code=lang_code,
+        )]
 
     def _vault_config_needs_translation(
         self, source_file: Path, existing_file: Path | None, rel: str, glossary=None

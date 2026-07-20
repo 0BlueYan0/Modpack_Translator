@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import struct
 import zipfile
@@ -328,6 +329,80 @@ def plan_vault_class_patch(game_root: Path, lang_code: str) -> VaultPatchPlan | 
 
 def apply_vault_class_patch(plan: VaultPatchPlan) -> None:
     _rewrite_jar(plan.jar_path, plan.replacements)
+
+
+# 顯示文句啟發式：首字大寫、至少兩個以空白分隔的 ASCII 詞（含空白的字串
+# 不可能是 Java 識別字/描述子/資源 ID）。\x01 是 invokedynamic 字串串接
+# 槽位。單詞顯示字串（Rendering/Color…）風險較高，只走人工白名單。
+_DISPLAY_LITERAL_RE = re.compile(r"^[A-Z][ -~\x01]*( [ -~\x01]+)+$")
+_VAULT_LITERAL_CLASS_PREFIXES = ("iskallia/vault/client/", "iskallia/vault/mixin/")
+
+
+def _is_display_literal(s: str) -> bool:
+    if not (4 <= len(s) <= 200):
+        return False
+    if "://" in s or s.startswith(("gui/", "textures/", "the_vault")):
+        return False
+    return bool(_DISPLAY_LITERAL_RE.match(s))
+
+
+def extract_vault_ui_literals(jar_path: Path) -> dict[str, list[str]]:
+    """列出 the_vault client/mixin class 內待翻的顯示字面值。
+
+    僅收「只被 CONSTANT_String 引用」且符合顯示文句啟發式的多詞 ASCII
+    字串（已翻譯者含 CJK、不符 ASCII 條件 → 自然冪等）；人工白名單
+    HARDCODED_UI_LITERALS 已涵蓋的字串交給 plan_vault_class_patch。"""
+    result: dict[str, list[str]] = {}
+    try:
+        with zipfile.ZipFile(jar_path) as zf:
+            for name in zf.namelist():
+                if not name.endswith(".class"):
+                    continue
+                if not name.startswith(_VAULT_LITERAL_CLASS_PREFIXES):
+                    continue
+                curated = vh.HARDCODED_UI_LITERALS.get(name, {})
+                try:
+                    utf8, string_refs, other_refs, _ = _parse_constant_pool(zf.read(name))
+                except ValueError:
+                    continue
+                out: list[str] = []
+                for idx, (_, raw) in utf8.items():
+                    if idx not in string_refs or idx in other_refs:
+                        continue
+                    try:
+                        text = raw.decode("ascii")
+                    except UnicodeDecodeError:
+                        continue  # 非 ASCII（含已翻中文）
+                    if text in curated:
+                        continue
+                    if _is_display_literal(text):
+                        out.append(text)
+                if out:
+                    result[name] = out
+    except (zipfile.BadZipFile, OSError):
+        return {}
+    return result
+
+
+def patch_vault_literal_map(jar_path: Path, mapping: dict[str, dict[str, str]]) -> int:
+    """依 class→{原文: 譯文} 改寫 jar 常數池，回傳實際替換數。"""
+    replacements: dict[str, bytes] = {}
+    total = 0
+    with zipfile.ZipFile(jar_path) as zf:
+        names = set(zf.namelist())
+        for cls, m in mapping.items():
+            if cls not in names or not m:
+                continue
+            try:
+                patched, n = _replace_class_string_literals(zf.read(cls), m)
+            except ValueError:
+                continue
+            if n:
+                replacements[cls] = patched
+                total += n
+    if replacements:
+        _rewrite_jar(jar_path, replacements)
+    return total
 
 
 def read_jar_json_lang(jar_path: Path, path_in_jar: str | None) -> dict[str, str]:
