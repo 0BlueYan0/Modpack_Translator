@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from modpack_translator.pipeline import sync
+from modpack_translator.pipeline.scanner import TranslationTarget
 
 
 def test_server_side_formats_membership():
@@ -52,3 +53,31 @@ def test_load_manifest_corrupt_returns_empty(tmp_path):
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text("{ not json", encoding="utf-8")
     assert sync.load_manifest(tmp_path) == []
+
+
+def _mk_target(fmt, target_file):
+    return TranslationTarget(
+        source_file=target_file, path_in_jar=None, mod_id="x",
+        format=fmt, output_mode="in_place", target_file=target_file,
+    )
+
+
+def test_build_manifest_keeps_only_server_side(tmp_path):
+    root = tmp_path
+    server_file = root / "config" / "ftbquests" / "quests" / "a.snbt"
+    client_file = root / "kubejs" / "assets" / "ns" / "lang" / "zh_tw.json"
+    targets = [
+        _mk_target("ftbq_inline_snbt", server_file),
+        _mk_target("kubejs_json", client_file),        # 客戶端 → 濾除
+        _mk_target("vh_config_json", root / "config" / "the_vault" / "x.json"),  # 客戶端 → 濾除
+    ]
+    entries = sync.build_manifest_from_targets(targets, root)
+    assert entries == [sync.ManifestEntry("config/ftbquests/quests/a.snbt", "ftbq_inline_snbt")]
+
+
+def test_build_manifest_skips_target_outside_root(tmp_path):
+    outside = tmp_path.parent / "elsewhere" / "a.snbt"
+    entries = sync.build_manifest_from_targets(
+        [_mk_target("ftbq_snbt", outside)], tmp_path
+    )
+    assert entries == []

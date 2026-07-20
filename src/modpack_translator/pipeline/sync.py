@@ -63,3 +63,21 @@ def merge_manifest(game_root: Path, entries: list[ManifestEntry]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = [asdict(e) for e in merged.values()]
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def build_manifest_from_targets(targets, game_root: Path) -> list[ManifestEntry]:
+    """從掃描目標挑出伺服器端格式，產生 manifest 條目（供既有已翻實例
+    首次同步時即時重建；輸出檔須落在 game_root 底下才收）。"""
+    entries: list[ManifestEntry] = []
+    for t in targets:
+        if not is_server_side(t.format):
+            continue
+        out = getattr(t, "target_file", None)
+        if out is None:
+            continue
+        try:
+            rel = Path(out).resolve().relative_to(Path(game_root).resolve())
+        except ValueError:
+            continue
+        entries.append(ManifestEntry(rel.as_posix(), t.format))
+    return entries
