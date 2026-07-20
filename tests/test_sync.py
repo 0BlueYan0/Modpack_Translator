@@ -228,3 +228,45 @@ def test_apply_sync_on_progress_only_counts_actionable(tmp_path):
     )
     # 只有 copy 這步觸發一次 on_progress，total 不含 skip
     assert calls == [(1, 1)]
+
+
+from modpack_translator.pipeline.scanner import resolve_game_root
+
+
+def test_end_to_end_only_server_side_synced(tmp_path):
+    # 假客戶端：伺服器端(ftbq + datapack) + 客戶端(mods jar + the_vault)
+    client = tmp_path / "client"
+    _write(client / "config" / "ftbquests" / "quests" / "ch1.snbt", "任務一")
+    _write(client / "kubejs" / "data" / "skilltree" / "skills" / "mage.json", '{"title":"法師"}')
+    _write(client / "config" / "the_vault" / "lang" / "zh_tw" / "x.json", '{"a":"甲"}')
+    (client / "mods").mkdir()
+    (client / "mods" / "x.jar").write_bytes(b"PK\x03\x04zip")
+    server = tmp_path / "server"
+    server.mkdir()
+
+    targets = [
+        _mk_target("ftbq_inline_snbt", client / "config" / "ftbquests" / "quests" / "ch1.snbt"),
+        _mk_target("datapack_json", client / "kubejs" / "data" / "skilltree" / "skills" / "mage.json"),
+        _mk_target("vh_config_json", client / "config" / "the_vault" / "lang" / "zh_tw" / "x.json"),
+    ]
+    manifest = sync.build_manifest_from_targets(targets, client)
+    plan = sync.plan_sync(client, server, manifest)
+    sync.apply_sync(plan, client, server, server / "bak")
+
+    # 伺服器端內容被複製
+    assert (server / "config" / "ftbquests" / "quests" / "ch1.snbt").exists()
+    assert (server / "kubejs" / "data" / "skilltree" / "skills" / "mage.json").exists()
+    # 客戶端內容（the_vault、mods）不被複製
+    assert not (server / "config" / "the_vault").exists()
+    assert not (server / "mods").exists()
+
+
+def test_server_root_resolution_layouts(tmp_path):
+    # PrismLauncher 式：<instance>/minecraft/
+    prism = tmp_path / "inst"
+    (prism / "minecraft" / "config").mkdir(parents=True)
+    assert resolve_game_root(prism) == prism / "minecraft"
+    # 專用伺服器式：config/ 直接在頂層
+    ded = tmp_path / "server"
+    (ded / "config").mkdir(parents=True)
+    assert resolve_game_root(ded) == ded
