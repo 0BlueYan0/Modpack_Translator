@@ -226,6 +226,30 @@ class MainWindow(QMainWindow):
 
         root_layout.addWidget(modpack_group)
 
+        # ── 伺服器同步群組 ────────────────────────────────────────────────
+        sync_group = QGroupBox("伺服器同步（選填）")
+        sf = QFormLayout(sync_group)
+        sf.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+
+        server_row = QHBoxLayout()
+        self.server_dir_edit = QLineEdit()
+        self.server_dir_edit.setPlaceholderText("專用伺服器實例資料夾（不同步可留空）…")
+        self.server_dir_edit.setText(self._settings.value("sync/server_dir", "") or "")
+        self.server_dir_edit.textChanged.connect(self._on_server_dir_changed)
+        _browse_server_btn = QPushButton("瀏覽…")
+        _browse_server_btn.setFixedWidth(80)
+        _browse_server_btn.clicked.connect(self._browse_server_dir)
+        server_row.addWidget(self.server_dir_edit)
+        server_row.addWidget(_browse_server_btn)
+        sf.addRow("伺服器資料夾：", server_row)
+
+        self.sync_btn = QPushButton("同步到伺服器")
+        self.sync_btn.clicked.connect(self._on_sync_clicked)
+        sf.addRow("", self.sync_btn)
+
+        root_layout.addWidget(sync_group)
+        self._update_sync_btn_enabled()
+
         # ── 模型設定群組 ──────────────────────────────────────────────────
         model_group = QGroupBox("模型設定")
         model_vbox = QVBoxLayout(model_group)
@@ -551,6 +575,25 @@ class MainWindow(QMainWindow):
         path = QFileDialog.getExistingDirectory(self, "選擇模組包實例資料夾")
         if path:
             self.modpack_edit.setText(path)
+
+    def _browse_server_dir(self):
+        path = QFileDialog.getExistingDirectory(self, "選擇專用伺服器實例資料夾")
+        if path:
+            self.server_dir_edit.setText(path)
+
+    def _on_server_dir_changed(self, text: str):
+        self._settings.setValue("sync/server_dir", text.strip())
+        self._update_sync_btn_enabled()
+
+    def _update_sync_btn_enabled(self):
+        has_server = bool(self.server_dir_edit.text().strip())
+        self.sync_btn.setEnabled(has_server)
+        self.sync_btn.setToolTip(
+            "" if has_server else "請先選擇伺服器資料夾才能同步。"
+        )
+
+    def _on_sync_clicked(self):
+        QMessageBox.information(self, "同步", "同步邏輯將於下一步接上。")
 
     def _browse_gguf(self):
         path, _ = QFileDialog.getOpenFileName(
