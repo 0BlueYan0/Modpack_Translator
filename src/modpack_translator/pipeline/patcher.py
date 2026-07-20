@@ -6,9 +6,11 @@ import shutil
 import struct
 import zipfile
 import zlib
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from modpack_translator.pipeline import vh
 from modpack_translator.pipeline.preprocessor import (
     format_snbt_lang,
     parse_json_lang,
@@ -75,6 +77,8 @@ def backup_quest_configs(game_root: Path) -> int:
         game_root / "config" / "heracles" / "quests",
         game_root / "config" / "betterquesting",
         game_root / "kubejs" / "assets",
+        # the_vault 語言表注入來源，就地翻譯值（見 vh.INPLACE_FILES）
+        game_root / "config" / "the_vault" / "translations.json",
     ]
     count = 0
     backup_root = game_root / "quests_bak"
@@ -171,6 +175,159 @@ def _needs_modonomicon_unicode_font_patch(data: Any) -> bool:
         return False
     providers = data.get("providers")
     return isinstance(providers, list) and not providers
+
+
+# ------------------------------------------------ the_vault class 常數池修補
+#
+# 兩類遊戲資料修不到的字串（詳見 vh.py 模組 docstring）：
+# 1. Config.SUPPORTED_LOCALES 硬編碼清單無 zh_tw → config/the_vault/lang/
+#    zh_tw/ 覆蓋檔永不載入。把清單中官方零資源的死 locale（es_mx）常數
+#    改寫為目標語言即可讓整套覆蓋檔生效。
+# 2. 選單樹（Vault Hunters Options 等）的 UI 字面值直接寫死在 class 裡。
+#
+# 皆為常數池 CONSTANT_Utf8 內容替換：class 檔內部一律以常數池「索引」
+# 定位、無絕對位元組偏移，變長替換安全。僅替換「只被 CONSTANT_String
+# 引用」的 Utf8——被 Class/NameAndType 等引用者是識別字，改了會壞。
+
+
+def _parse_constant_pool(data: bytes) -> tuple[dict[int, tuple[int, bytes]], set[int], set[int], int]:
+    """解析 class 常數池。回傳 (utf8 索引→(entry 起始位移, 內容 bytes),
+    被 CONSTANT_String 引用的 utf8 索引集, 被其他常數引用的 utf8 索引集,
+    常數池結束位移)。非 class 檔或未知 tag 拋 ValueError。"""
+    if data[:4] != b"\xca\xfe\xba\xbe":
+        raise ValueError("not a class file")
+    count = int.from_bytes(data[8:10], "big")
+    utf8: dict[int, tuple[int, bytes]] = {}
+    string_refs: set[int] = set()
+    other_refs: set[int] = set()
+    off = 10
+    i = 1
+    while i < count:
+        tag = data[off]
+        if tag == 1:  # Utf8
+            ln = int.from_bytes(data[off + 1:off + 3], "big")
+            utf8[i] = (off, data[off + 3:off + 3 + ln])
+            off += 3 + ln
+        elif tag in (3, 4):  # Integer/Float
+            off += 5
+        elif tag in (5, 6):  # Long/Double（佔兩個索引槽）
+            off += 9
+            i += 1
+        elif tag == 8:  # String → utf8
+            string_refs.add(int.from_bytes(data[off + 1:off + 3], "big"))
+            off += 3
+        elif tag in (7, 16, 19, 20):  # Class/MethodType/Module/Package → utf8
+            other_refs.add(int.from_bytes(data[off + 1:off + 3], "big"))
+            off += 3
+        elif tag == 12:  # NameAndType → utf8, utf8
+            other_refs.add(int.from_bytes(data[off + 1:off + 3], "big"))
+            other_refs.add(int.from_bytes(data[off + 3:off + 5], "big"))
+            off += 5
+        elif tag in (9, 10, 11, 17, 18):  # *ref/Dynamic（引用 Class/NameAndType，非 utf8）
+            off += 5
+        elif tag == 15:  # MethodHandle（引用 *ref）
+            off += 4
+        else:
+            raise ValueError(f"unknown constant pool tag {tag}")
+        i += 1
+    return utf8, string_refs, other_refs, off
+
+
+def _encode_modified_utf8(text: str) -> bytes:
+    """Java modified UTF-8：BMP 非 NUL 字元與標準 UTF-8 相同；替換字串
+    僅允許此子集（本工具的譯文皆為 BMP）。"""
+    for ch in text:
+        if ch == "\x00" or ord(ch) > 0xFFFF:
+            raise ValueError(f"unsupported char in class literal: {ch!r}")
+    return text.encode("utf-8")
+
+
+def _replace_class_string_literals(data: bytes, replacements: dict[str, str]) -> tuple[bytes, int]:
+    """把常數池中「僅被 CONSTANT_String 引用」的 Utf8 字面值換為譯文。
+    回傳 (新 bytes, 替換數)；替換後重新解析驗證，失敗拋 ValueError。"""
+    utf8, string_refs, other_refs, _ = _parse_constant_pool(data)
+    wanted = {key.encode("utf-8"): value for key, value in replacements.items()}
+    hits: list[tuple[int, bytes, bytes]] = []  # (entry 位移, 原 bytes, 新 bytes)
+    for idx, (entry_off, raw) in utf8.items():
+        new_text = wanted.get(raw)
+        if new_text is None:
+            continue
+        if idx not in string_refs or idx in other_refs:
+            continue
+        hits.append((entry_off, raw, _encode_modified_utf8(new_text)))
+    if not hits:
+        return data, 0
+    out = bytearray(data)
+    for entry_off, raw, new_bytes in sorted(hits, reverse=True):
+        out[entry_off + 1:entry_off + 3 + len(raw)] = (
+            len(new_bytes).to_bytes(2, "big") + new_bytes
+        )
+    patched = bytes(out)
+    _parse_constant_pool(patched)  # 驗證：改壞寧可拋錯也不寫入
+    return patched, len(hits)
+
+
+@dataclass
+class VaultPatchPlan:
+    jar_path: Path
+    replacements: dict[str, bytes] = field(default_factory=dict)
+    locale_patched: bool = False
+    literal_count: int = 0
+
+
+def find_vault_jar(game_root: Path) -> Path | None:
+    mods_dir = game_root / "mods"
+    if not mods_dir.is_dir():
+        return None
+    for jar in sorted(mods_dir.glob("*.jar")):
+        if jar.name.lower().startswith("the_vault"):
+            return jar
+    return None
+
+
+def plan_vault_class_patch(game_root: Path, lang_code: str) -> VaultPatchPlan | None:
+    """算出 the_vault jar 需要的 class 修補（不寫入）。無事可做回傳 None。
+    解析失敗的 class 一律跳過（未來 VH 版本結構變動時寧可少修不誤修）。"""
+    jar_path = find_vault_jar(game_root)
+    if jar_path is None:
+        return None
+    locale = lang_code.lower()
+    plan = VaultPatchPlan(jar_path=jar_path)
+    try:
+        with zipfile.ZipFile(jar_path) as zf:
+            names = set(zf.namelist())
+            if vh.CONFIG_CLASS_PATH in names and locale != vh.LOCALE_PATCH_DONOR:
+                try:
+                    raw = zf.read(vh.CONFIG_CLASS_PATH)
+                    utf8, _, _, _ = _parse_constant_pool(raw)
+                    values = {payload for _, payload in utf8.values()}
+                    if locale.encode("ascii") not in values:  # 已支援/已修補則略過
+                        patched, n = _replace_class_string_literals(
+                            raw, {vh.LOCALE_PATCH_DONOR: locale}
+                        )
+                        if n:
+                            plan.replacements[vh.CONFIG_CLASS_PATH] = patched
+                            plan.locale_patched = True
+                except ValueError:
+                    pass
+            if locale == "zh_tw":
+                for cls, mapping in vh.HARDCODED_UI_LITERALS.items():
+                    if cls not in names:
+                        continue
+                    try:
+                        patched, n = _replace_class_string_literals(zf.read(cls), mapping)
+                    except ValueError:
+                        continue
+                    if n:
+                        plan.replacements[cls] = patched
+                        plan.literal_count += n
+    except (zipfile.BadZipFile, OSError):
+        return None
+    return plan if plan.replacements else None
+
+
+def apply_vault_class_patch(plan: VaultPatchPlan) -> None:
+    _rewrite_jar(plan.jar_path, plan.replacements)
 
 
 def read_jar_json_lang(jar_path: Path, path_in_jar: str | None) -> dict[str, str]:

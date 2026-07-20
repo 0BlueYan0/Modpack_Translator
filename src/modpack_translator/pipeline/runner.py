@@ -726,7 +726,8 @@ def _process_vh_config(
     source_strings = vh.extract_text(source_data, spec)
     existing_data = _read_local_json_dict(target.existing_file)
     existing_strings = vh.extract_text(existing_data, spec) if existing_data else {}
-    # 既有譯文（可能來自上一輪或大寫語系目錄）可用者先套回，僅補譯 diff
+    # 既有譯文（可能來自上一輪或大寫語系目錄）可用者先套回，僅補譯 diff；
+    # 首尾空白以原文為準補回（quest 描述段 "\n\n" 前綴曾被管線剝掉）
     for path_key, existing_value in existing_strings.items():
         source_value = source_strings.get(path_key)
         if source_value is None:
@@ -739,7 +740,7 @@ def _process_vh_config(
             if enforced != existing_value:
                 cache[ck] = enforced
                 existing_value = enforced
-        vh.apply_text(data, path_key, existing_value)
+        vh.apply_text(data, path_key, vh.preserve_edges(source_value, existing_value))
 
     current_strings = vh.extract_text(data, spec)
     to_translate = diff_keys(source_strings, current_strings, glossary=glossary)
@@ -759,7 +760,7 @@ def _process_vh_config(
             value = _enforce_glossary(glossary, src, cache[ck])
             if value != cache[ck]:
                 cache[ck] = value
-            vh.apply_text(data, path_key, value)
+            vh.apply_text(data, path_key, vh.preserve_edges(src, value))
             changed = True
             n_cached += 1
             if on_pair_done is not None:
@@ -768,6 +769,7 @@ def _process_vh_config(
         cache.pop(ck, None)
         final, ok = _translate_segmented_text(translator, src, retry_count, cancel_check)
         if ok:
+            final = vh.preserve_edges(src, final)
             vh.apply_text(data, path_key, final)
             cache[ck] = final
             changed = True

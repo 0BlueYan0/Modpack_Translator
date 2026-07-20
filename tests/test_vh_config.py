@@ -160,6 +160,101 @@ def test_translated_config_is_idempotent(tmp_path):
     assert out_file.read_bytes() == before
 
 
+# ── quest 描述段 "\n\n" 邊緣空白修復 ────────────────────────────────────
+
+_QUESTS_EDGED = {
+    "quests": [
+        {
+            "id": "vault_introduction",
+            "name": "Vault Hunters Introduction",
+            "descriptionData": {
+                "description": [
+                    {"text": "Welcome to Vault Hunters!", "color": "$text"},
+                    {"text": "\n\nThis modpack turns your game around.", "color": "$text"},
+                ]
+            },
+        }
+    ]
+}
+
+
+def test_edge_whitespace_repair_without_api(tmp_path):
+    """既有譯文遺失原文 "\n\n" 前綴 → 掃描應標記、runner 零 API 修復。"""
+    root = _make_vh(tmp_path)
+    cfg = root / "config" / "the_vault"
+    (cfg / "quest" / "quests.json").write_text(json.dumps(_QUESTS_EDGED), encoding="utf-8")
+    translated = json.loads(json.dumps(_QUESTS_EDGED))
+    quest = translated["quests"][0]
+    quest["name"] = "寶庫獵人介紹"
+    desc = quest["descriptionData"]["description"]
+    desc[0]["text"] = "歡迎來到寶庫獵人！"
+    desc[1]["text"] = "這個模組包會顛覆你的遊戲。"  # 前綴 \n\n 遺失
+    out = cfg / "lang" / "zh_tw" / "quest" / "quests.json"
+    out.parent.mkdir(parents=True)
+    out.write_text(json.dumps(translated, ensure_ascii=False), encoding="utf-8")
+
+    targets = [t for t in _vh_targets(root) if t.source_file.name == "quests.json"]
+    assert targets, "邊緣空白不符應被掃出"
+    process_target(targets[0], _Boom(), {}, "zh_tw")  # 不得呼叫 API
+    repaired = json.loads(out.read_text(encoding="utf-8"))
+    desc = repaired["quests"][0]["descriptionData"]["description"]
+    assert desc[1]["text"] == "\n\n這個模組包會顛覆你的遊戲。"
+    assert desc[0]["text"] == "歡迎來到寶庫獵人！"
+    # 修復後冪等
+    assert [t for t in _vh_targets(root) if t.source_file.name == "quests.json"] == []
+
+
+def test_preserve_edges():
+    assert vh.preserve_edges("\n\nHello.", "你好。") == "\n\n你好。"
+    assert vh.preserve_edges("Hello. ", "你好。") == "你好。 "
+    assert vh.preserve_edges("Hello.", "你好。") == "你好。"
+    assert vh.preserve_edges("\n\nHello.", "\n\n你好。") == "\n\n你好。"
+    assert vh.preserve_edges("\n\nHello.", "   ") == "   "
+
+
+# ── translations.json 就地翻譯（MixinClientLanguage 語言表注入來源） ─────
+
+_TRANSLATIONS = {
+    "translations": {
+        "the_vault.boss_rune_effect.light_melee": "Melee Attack",
+        "the_vault.boss_rune_effect.health": "Health",
+    }
+}
+
+
+def test_translations_json_translated_in_place(tmp_path):
+    root = _make_vh(tmp_path)
+    cfg = root / "config" / "the_vault"
+    tj = cfg / "translations.json"
+    tj.write_text(json.dumps(_TRANSLATIONS), encoding="utf-8")
+
+    targets = [t for t in _vh_targets(root) if t.source_file.name == "translations.json"]
+    assert len(targets) == 1
+    target = targets[0]
+    assert target.target_file == tj  # 來源即目標
+    process_target(target, _Dict({
+        "Melee Attack": "近戰攻擊",
+        "Health": "生命值",
+    }), {}, "zh_tw")
+    out = json.loads(tj.read_text(encoding="utf-8"))
+    assert out["translations"]["the_vault.boss_rune_effect.light_melee"] == "近戰攻擊"
+    assert out["translations"]["the_vault.boss_rune_effect.health"] == "生命值"
+    # 值已含 CJK → 冪等，重掃無目標
+    assert [t for t in _vh_targets(root) if t.source_file.name == "translations.json"] == []
+
+
+def test_scan_emits_sky_quests(tmp_path):
+    root = _make_vh(tmp_path)
+    cfg = root / "config" / "the_vault"
+    sky = cfg / "quest" / "sky_quests.json"
+    sky.write_text(json.dumps(_QUESTS), encoding="utf-8")
+    targets = {t.source_file.name: t for t in _vh_targets(root)}
+    assert "sky_quests.json" in targets
+    assert targets["sky_quests.json"].target_file == (
+        root / "config" / "the_vault" / "lang" / "zh_tw" / "quest" / "sky_quests.json"
+    )
+
+
 # ── 各檔 spec 抽取規則（不落地檔案的單元驗證） ──────────────────────────
 
 def test_extract_trials_screen_list_and_text_fields():

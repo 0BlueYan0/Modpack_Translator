@@ -12,10 +12,12 @@ from modpack_translator.config import AppConfig
 from modpack_translator.pipeline.batch_prefill import prefill_translation_cache
 from modpack_translator.pipeline.glossary import Glossary, load_merged_glossary
 from modpack_translator.pipeline.patcher import (
+    apply_vault_class_patch,
     backup_mods,
     backup_pack_sources,
     backup_quest_configs,
     patch_modonomicon_unicode_fonts,
+    plan_vault_class_patch,
 )
 from modpack_translator.pipeline.pack_context import load_pack_context
 from modpack_translator.pipeline.preprocessor import diff_keys
@@ -173,12 +175,30 @@ class TranslateWorker(QThread):
             total_pairs_done = 0
 
             game_root = resolve_game_root(self._modpack_path)
-            if any(t.output_mode == "jar_inject" for t in self._targets):
+            needs_jar_writes = any(t.output_mode == "jar_inject" for t in self._targets)
+            # the_vault class 修補：SUPPORTED_LOCALES 清單無 zh_tw（lang/zh_tw
+            # 覆蓋檔永不載入）＋選單硬編碼字串。與是否有翻譯目標無關，
+            # 每輪皆檢查（已修補則 plan 為 None）。
+            vault_plan = plan_vault_class_patch(game_root, self._cfg.language.code)
+            if needs_jar_writes or vault_plan is not None:
                 backed_up = backup_mods(game_root)
                 self.log.emit(f"已備份 {backed_up} 個原始模組 jar 至 mods_bak/")
+            if needs_jar_writes:
                 patched_fonts = patch_modonomicon_unicode_fonts(game_root)
                 if patched_fonts:
                     self.log.emit(f"已修補 {patched_fonts} 個 Modonomicon Unicode 字型 fallback")
+            if vault_plan is not None:
+                apply_vault_class_patch(vault_plan)
+                if vault_plan.locale_patched:
+                    self.log.emit(
+                        f"已修補 the_vault 支援語言清單（es_mx → {self._cfg.language.code.lower()}），"
+                        "config/the_vault/lang/ 覆蓋檔（任務書/技能/tooltip 等）自此生效"
+                    )
+                if vault_plan.literal_count:
+                    self.log.emit(
+                        f"已修補 the_vault 選單硬編碼字串 {vault_plan.literal_count} 處"
+                        "（Vault Hunters Options 選單樹）"
+                    )
             if any(t.output_mode == "in_place" for t in self._targets):
                 backed_up = backup_quest_configs(game_root)
                 self.log.emit(f"已備份 {backed_up} 個任務/設定資料夾至 quests_bak/")

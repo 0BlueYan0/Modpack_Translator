@@ -942,6 +942,24 @@ class ModpackScanner:
                 target_file=write_file,
                 existing_file=existing_file,
             ))
+        # translations.json 無 locale 變體（MixinClientLanguage 直接注入語言
+        # 表），來源即目標就地翻譯；已含 CJK 的值視為完成 → 冪等
+        for rel in vh.INPLACE_FILES:
+            source = config_dir.joinpath(*rel.split("/"))
+            if not source.is_file():
+                continue
+            if not self._vault_config_needs_translation(source, source, rel, glossary):
+                continue
+            targets.append(TranslationTarget(
+                source_file=source,
+                path_in_jar=None,
+                mod_id="the_vault",
+                format="vh_config_json",
+                output_mode="in_place",
+                output_lang_code=lang_code,
+                target_file=source,
+                existing_file=source,
+            ))
         return targets
 
     def _vault_config_needs_translation(
@@ -961,7 +979,15 @@ class ModpackScanner:
                 existing = vh.read_config_text(existing_file, rel)
             except (OSError, UnicodeDecodeError, json.JSONDecodeError):
                 existing = {}
-        return bool(diff_keys(source, existing, glossary=glossary))
+        if diff_keys(source, existing, glossary=glossary):
+            return True
+        # 既有譯文首尾空白與原文不符（quest 描述段的 "\n\n" 前綴被翻譯管線
+        # 剝掉會讓任務書段落擠成一團）→ 需修復（runner 套用時零 API 補回）
+        return any(
+            vh.preserve_edges(source[key], value) != value
+            for key, value in existing.items()
+            if key in source
+        )
 
     # ---------------------------------------------------- 光影包 shader lang
 
