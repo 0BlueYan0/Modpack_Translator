@@ -84,6 +84,21 @@ def test_build_manifest_skips_target_outside_root(tmp_path):
     assert entries == []
 
 
+def test_build_manifest_inline_snbt_uses_source_file(tmp_path):
+    # inline snbt 就地改寫來源檔：target_file 為 None，輸出即 source_file。
+    # 不 fallback 到 source_file 的話，FTB Quests 章節會被漏掉不同步。
+    root = tmp_path
+    chapter = root / "config" / "ftbquests" / "quests" / "chapters" / "ch1.snbt"
+    inline_target = TranslationTarget(
+        source_file=chapter, path_in_jar=None, mod_id="ftbquests",
+        format="ftbq_inline_snbt", output_mode="in_place", target_file=None,
+    )
+    entries = sync.build_manifest_from_targets([inline_target], root)
+    assert entries == [
+        sync.ManifestEntry("config/ftbquests/quests/chapters/ch1.snbt", "ftbq_inline_snbt")
+    ]
+
+
 def _write(p: Path, text: str):
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(text, encoding="utf-8")

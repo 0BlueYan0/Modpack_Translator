@@ -69,12 +69,17 @@ def merge_manifest(game_root: Path, entries: list[ManifestEntry]) -> None:
 
 def build_manifest_from_targets(targets, game_root: Path) -> list[ManifestEntry]:
     """從掃描目標挑出伺服器端格式，產生 manifest 條目（供既有已翻實例
-    首次同步時即時重建；輸出檔須落在 game_root 底下才收）。"""
+    首次同步時即時重建；輸出檔須落在 game_root 底下才收）。
+
+    伺服器端格式一律 output_mode="in_place"，輸出檔為 target_file；但就地
+    改寫來源的 inline 格式（ftbq_inline_snbt / heracles_inline_snbt）
+    target_file 為 None、輸出即 source_file——這類要用 source_file，否則
+    FTB Quests 章節等就地翻譯的內容會被漏掉不同步。"""
     entries: list[ManifestEntry] = []
     for t in targets:
         if not is_server_side(t.format):
             continue
-        out = getattr(t, "target_file", None)
+        out = t.target_file or t.source_file
         if out is None:
             continue
         try:
