@@ -1,3 +1,4 @@
+import shutil
 from pathlib import Path
 
 from modpack_translator.pipeline import sync
@@ -173,3 +174,57 @@ def test_apply_sync_never_deletes_server_extra(tmp_path):
     plan = sync.plan_sync(client, server, [sync.ManifestEntry("a.snbt", "ftbq_snbt")])
     sync.apply_sync(plan, client, server, server / "bak")
     assert (server / "extra.snbt").read_text(encoding="utf-8") == "KEEP"
+
+
+def test_apply_sync_failed_item_does_not_stop_loop(tmp_path, monkeypatch):
+    client = tmp_path / "client"
+    server = tmp_path / "server"
+    _write(client / "bad.snbt", "BAD")
+    _write(client / "good.snbt", "GOOD")
+    # 伺服器兩者皆缺 → 都是 copy
+    manifest = [
+        sync.ManifestEntry("bad.snbt", "ftbq_snbt"),
+        sync.ManifestEntry("good.snbt", "ftbq_snbt"),
+    ]
+    plan = sync.plan_sync(client, server, manifest)
+
+    real_copy2 = shutil.copy2
+
+    def fake_copy2(src, dst, *args, **kwargs):
+        if Path(src).name == "bad.snbt":
+            raise OSError("boom")
+        return real_copy2(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(sync.shutil, "copy2", fake_copy2)
+
+    backup = server / ".modpack_translator" / "sync_bak" / "ts"
+    result = sync.apply_sync(plan, client, server, backup)
+
+    # bad.snbt 失敗但不中斷迴圈，good.snbt 仍正常複製
+    assert len(result.failed) == 1
+    failed_path, err_msg = result.failed[0]
+    assert failed_path == "bad.snbt"
+    assert "boom" in err_msg
+    assert result.copied == ["good.snbt"]
+    assert (server / "good.snbt").read_text(encoding="utf-8") == "GOOD"
+    assert not (server / "bad.snbt").exists()
+
+
+def test_apply_sync_on_progress_only_counts_actionable(tmp_path):
+    client = tmp_path / "client"
+    server = tmp_path / "server"
+    _write(client / "a.snbt", "AAA")   # 伺服器缺 → copy
+    _write(client / "c.snbt", "SAME")  # 相同 → skip
+    _write(server / "c.snbt", "SAME")
+    manifest = [
+        sync.ManifestEntry("a.snbt", "ftbq_snbt"),
+        sync.ManifestEntry("c.snbt", "ftbq_snbt"),
+    ]
+    plan = sync.plan_sync(client, server, manifest)
+    calls: list[tuple[int, int]] = []
+    sync.apply_sync(
+        plan, client, server, server / "bak",
+        on_progress=lambda done, total: calls.append((done, total)),
+    )
+    # 只有 copy 這步觸發一次 on_progress，total 不含 skip
+    assert calls == [(1, 1)]
