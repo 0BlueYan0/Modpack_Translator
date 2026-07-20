@@ -81,3 +81,44 @@ def test_build_manifest_skips_target_outside_root(tmp_path):
         [_mk_target("ftbq_snbt", outside)], tmp_path
     )
     assert entries == []
+
+
+def _write(p: Path, text: str):
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(text, encoding="utf-8")
+
+
+def test_plan_sync_four_cases(tmp_path):
+    client = tmp_path / "client"
+    server = tmp_path / "server"
+    # 來源檔（客戶端）
+    _write(client / "a.snbt", "AAA")   # 伺服器缺 → copy
+    _write(client / "b.snbt", "NEW")   # 伺服器不同 → overwrite
+    _write(client / "c.snbt", "SAME")  # 相同 → skip
+    _write(client / "d.snbt", "X")     # 來源在但 manifest 也列;伺服器缺 → copy
+    # 伺服器端既有
+    _write(server / "b.snbt", "OLD")
+    _write(server / "c.snbt", "SAME")
+    _write(server / "extra.snbt", "KEEP")  # manifest 未涵蓋 → 不得出現在 plan
+    manifest = [
+        sync.ManifestEntry("a.snbt", "ftbq_snbt"),
+        sync.ManifestEntry("b.snbt", "ftbq_snbt"),
+        sync.ManifestEntry("c.snbt", "ftbq_snbt"),
+        sync.ManifestEntry("d.snbt", "ftbq_snbt"),
+    ]
+    plan = sync.plan_sync(client, server, manifest)
+    actions = {i.rel_path: i.action for i in plan.items}
+    assert actions == {"a.snbt": "copy", "b.snbt": "overwrite", "c.snbt": "skip", "d.snbt": "copy"}
+    assert "extra.snbt" not in actions
+    assert {i.rel_path for i in plan.copies} == {"a.snbt", "d.snbt"}
+    assert {i.rel_path for i in plan.overwrites} == {"b.snbt"}
+    assert {i.rel_path for i in plan.skips} == {"c.snbt"}
+
+
+def test_plan_sync_skips_missing_source(tmp_path):
+    client = tmp_path / "client"
+    server = tmp_path / "server"
+    client.mkdir()
+    manifest = [sync.ManifestEntry("gone.snbt", "ftbq_snbt")]  # 客戶端無此檔
+    plan = sync.plan_sync(client, server, manifest)
+    assert plan.items == []

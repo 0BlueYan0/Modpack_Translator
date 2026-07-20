@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import filecmp
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -81,3 +82,50 @@ def build_manifest_from_targets(targets, game_root: Path) -> list[ManifestEntry]
             continue
         entries.append(ManifestEntry(rel.as_posix(), t.format))
     return entries
+
+
+@dataclass(frozen=True)
+class SyncItem:
+    rel_path: str
+    action: str        # "copy" | "overwrite" | "skip"
+
+
+@dataclass(frozen=True)
+class SyncPlan:
+    items: list[SyncItem]
+
+    @property
+    def copies(self) -> list[SyncItem]:
+        return [i for i in self.items if i.action == "copy"]
+
+    @property
+    def overwrites(self) -> list[SyncItem]:
+        return [i for i in self.items if i.action == "overwrite"]
+
+    @property
+    def skips(self) -> list[SyncItem]:
+        return [i for i in self.items if i.action == "skip"]
+
+
+def plan_sync(client_root: Path, server_root: Path, manifest: list[ManifestEntry]) -> SyncPlan:
+    """逐 manifest 條目規劃複製動作：客戶端來源已刪 → 跳過(自我修復)；
+    伺服器端無檔 → copy；有但位元組不同 → overwrite；相同 → skip。
+    伺服器端 manifest 未涵蓋的檔一律不出現在 plan（絕不刪）。"""
+    items: list[SyncItem] = []
+    seen: set[str] = set()
+    for entry in manifest:
+        rel = entry.rel_path
+        if rel in seen:
+            continue
+        seen.add(rel)
+        src = client_root / rel
+        if not src.is_file():
+            continue  # 來源已不存在：略過（自我修復舊條目）
+        dst = server_root / rel
+        if not dst.exists():
+            items.append(SyncItem(rel, "copy"))
+        elif filecmp.cmp(str(src), str(dst), shallow=False):
+            items.append(SyncItem(rel, "skip"))
+        else:
+            items.append(SyncItem(rel, "overwrite"))
+    return SyncPlan(items)
