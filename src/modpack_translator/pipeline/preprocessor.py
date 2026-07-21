@@ -198,6 +198,8 @@ def is_usable_translation(
         return accept_identical_proper_noun or _is_quest_title_key(key)
     if not _preserves_required_tokens(source, target):
         return False
+    if not _preserves_internal_newlines(source, target):
+        return False
     if needs_visible_translation and not _has_cjk_text(target):
         return False
     return not _looks_undertranslated(source, target)
@@ -267,6 +269,27 @@ def _is_soft_token(token: str) -> bool:
     # \& 只是跳脫的 & 符號；譯文改寫句子時捨棄它不影響可讀性
     # §x/§z 等 FancyMenu 自訂格式碼同屬裝飾性標記
     return bool(re.fullmatch(r"§[0-9A-Za-z]|&[0-9A-FK-ORa-fk-or]|\\&", token))
+
+
+def _preserves_internal_newlines(source: str, target: str) -> bool:
+    """譯文的內部真換行數不得少於原文。
+
+    JSON/SNBT lang 值經 json.loads 解碼後，字面 \\n 變成真換行字元（0x0A）。
+    這些真換行是 GUI 的硬折行——固定寬度框（FancyMenu/config tooltip 等不自動
+    換行的介面）靠它逐行排版。但 encode() 不會 token 化真換行（_PLACEHOLDERS
+    只收字面 \\n），故整串送模型時真換行不受保護，模型會把多行重排、併成較少
+    的長行；併出的行比原本依英文行寬設計的框更寬 → 文字溢出框外。
+
+    整串譯文若把內部換行併少了就視為不可用，呼叫端（_translate_segmented_text）
+    改走逐行分段翻譯——依 \\n+ 切段、每個換行分隔原樣保留，使譯文行結構與原文
+    一致。尾端換行 GUI 不顯示、增減無害，故 strip() 去邊界後才計數；譯文比原文
+    多換行（把長句主動折行）也無害，只擋「變少」。字面 \\n（legacy/bq lang，未
+    經解碼）另由 _preserves_required_tokens 保護，與此檢查互不干涉。
+    """
+    src_internal = source.strip().count("\n")
+    if src_internal == 0:
+        return True
+    return target.strip().count("\n") >= src_internal
 
 
 _QUEST_TITLE_KEY_RE = re.compile(
