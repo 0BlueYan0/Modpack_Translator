@@ -33,9 +33,11 @@ from modpack_translator.pipeline.preprocessor import (
     decode,
     diff_keys,
     encode,
+    is_dawncraft_dialogue,
     jar_member_exists,
     read_inline_snbt_text,
     is_usable_translation,
+    rewrap_dawncraft_dialogue,
     read_jar_text,
     read_legacy_lang,
     read_bq_lang,
@@ -598,6 +600,11 @@ def process_target(
     # （只寫 result 會讓新小寫檔僅含本輪 diff,其餘 fallback 成英文）。
     # inline 格式就地改寫來源檔,zh_existing 為空,payload 即 result。
     write_payload = {**zh_existing, **result}
+    # DawnCraft-Tweaks 對話（來源含 ¶）：其算繪器靠半形空格斷行，中文無空格會整段
+    # 溢出對話框；仿官方 zh_cn patch 插入空格折行（rewrap_dawncraft_dialogue 冪等）。
+    for _key in write_payload:
+        if isinstance(write_payload[_key], str) and is_dawncraft_dialogue(en_dict.get(_key, "")):
+            write_payload[_key] = rewrap_dawncraft_dialogue(write_payload[_key])
     # result 為空但既有譯文在非正規(大寫)檔、正規小寫檔尚不存在 → 純遷移,仍要建立小寫檔。
     should_write = bool(result) or (bool(zh_existing) and not _output_exists(target))
 

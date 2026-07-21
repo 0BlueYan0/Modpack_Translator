@@ -292,6 +292,73 @@ def _preserves_internal_newlines(source: str, target: str) -> bool:
     return target.strip().count("\n") >= src_internal
 
 
+# ── DawnCraft-Tweaks 對話折行 ────────────────────────────────────────
+# DawnCraft-Tweaks 的 NPC 對話（值以 ¶ 分頁、¬ 標行）在其自訂算繪器裡是靠
+# 「半形空格」斷行的（西方文字邏輯，反編譯確認為 char-32 掃描）。中文沒有
+# 空格，整段永遠不折行 → 溢出對話框。官方認可的 zh_cn patch 作法：拿掉
+# ¶/¬，把譯文折成每行約 34 字，行間塞一串空格製造斷點（空格隱形、斷行處
+# 被吃掉）。此處照做。因是「字數」邏輯，與 GUI 縮放無關。
+_DIALOGUE_MARK = "¶"          # ¶ 分頁標記（來源含此字＝對話項）
+_DIALOGUE_LINEBREAK = "¬"     # ¬ 換行標記（此算繪器不處理，一併移除）
+_DIALOGUE_LINE_CHARS = 34          # 每行字數上限（校準對話框寬，同官方 zh_cn）
+_DIALOGUE_PAD_TO = 56              # 每行補空格到此字數，觸發 mod 的空格斷行
+_DIALOGUE_WRAP_SPACES_RE = re.compile(r"[ \t]{2,}")
+_CJK_CHAR = r"⺀-鿿　-〿＀-￯"
+_DIALOGUE_CJK_GAP_RE = re.compile(rf"(?<=[{_CJK_CHAR}])[ \t]{{2,}}(?=[{_CJK_CHAR}])")
+_ASCII_WORD_TAIL_RE = re.compile(r"[0-9A-Za-z][0-9A-Za-z._:/'\-]*$")
+
+
+def is_dawncraft_dialogue(source: str) -> bool:
+    """來源值是否為 DawnCraft-Tweaks 風格對話（含 ¶ 分頁標記）。"""
+    return _DIALOGUE_MARK in source
+
+
+def _strip_dialogue_wrap(text: str) -> str:
+    """還原對話的「邏輯文字」：移除 ¶/¬ 與先前插入的折行空格串，供冪等重折。
+    折行空格串（2+ 空格）在 CJK 之間直接刪、其餘收斂成單一空格（保住數字/
+    英文詞周邊的單一空格）。"""
+    text = text.replace(_DIALOGUE_MARK, "").replace(_DIALOGUE_LINEBREAK, "")
+    text = _DIALOGUE_CJK_GAP_RE.sub("", text)
+    text = _DIALOGUE_WRAP_SPACES_RE.sub(" ", text)
+    return text
+
+
+def rewrap_dawncraft_dialogue(translation: str) -> str:
+    """把對話譯文折成每行 ≤ _DIALOGUE_LINE_CHARS 字、行間補空格觸發 mod 斷行。
+
+    先 _strip_dialogue_wrap 還原邏輯文字（冪等：對已折行的譯文重套結果不變），
+    再逐字累積成行，不切斷 ASCII 單字/數字；每行（末行除外）補空格到
+    _DIALOGUE_PAD_TO 字。單行以內（無需折行）直接回傳還原後文字。
+    """
+    logical = _strip_dialogue_wrap(translation).strip()
+    if not logical:
+        return translation
+    lines: list[str] = []
+    cur = ""
+    for ch in logical:
+        if len(cur) >= _DIALOGUE_LINE_CHARS and cur.strip():
+            if ch.isascii() and ch.isalnum() and _ASCII_WORD_TAIL_RE.search(cur):
+                # 正要切在 ASCII 詞中間：退回該詞起點斷行，別把單字/數字切斷
+                m = _ASCII_WORD_TAIL_RE.search(cur)
+                if m.start() > 0:
+                    lines.append(cur[:m.start()].rstrip())
+                    cur = cur[m.start():]
+                else:
+                    lines.append(cur.rstrip())
+                    cur = ""
+            else:
+                lines.append(cur.rstrip())
+                cur = ""
+        cur += ch
+    if cur.strip():
+        lines.append(cur.rstrip())
+    if len(lines) <= 1:
+        return logical
+    padded = [ln + " " * max(2, _DIALOGUE_PAD_TO - len(ln)) for ln in lines[:-1]]
+    padded.append(lines[-1])
+    return "".join(padded)
+
+
 _QUEST_TITLE_KEY_RE = re.compile(
     r"^(?:chapter|chapter_group|quest|task|reward|reward_table|loot_crate|file)\."
     r"[0-9A-Fa-f]+\.(?:title|subtitle|quest_subtitle)(?:\[\d+\])?$"
